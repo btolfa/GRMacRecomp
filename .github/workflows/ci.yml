@@ -3,11 +3,14 @@ name: Verify
 on:
   pull_request:
   push:
-    branches:
-      - main
+    branches: [main, gravity_rush, 'gr/**']
 
 permissions:
   contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   go:
@@ -27,11 +30,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Install dependencies
+        run: brew install cmake ninja freetype ffmpeg
+
+      - name: Build ps4-recomp
+        run: ./scripts/build.sh
+
       - name: Build
         run: go build ./...
 
       - name: Vet
         run: go vet ./...
 
+      # Tests gated on PS4_GR_EBOOT skip here: the game's eboot.bin never leaves the machine.
       - name: Test
         run: go test -count=1 ./...

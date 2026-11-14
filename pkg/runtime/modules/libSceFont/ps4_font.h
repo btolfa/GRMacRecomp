@@ -364,6 +364,8 @@ void shim_sceFontSetupRenderEffectSlant(GuestContext *ctx);
 void shim_sceFontGetHorizontalLayout(GuestContext *ctx);
 void shim_sceFontGetCharGlyphMetrics(GuestContext *ctx);
 void shim_sceFontGetKerning(GuestContext *ctx);
+void shim_sceFontGetRenderScaledKerning(GuestContext *ctx);
+void shim_sceFontGetPixelResolution(GuestContext *ctx);
 void shim_sceFontRenderSurfaceSetScissor(GuestContext *ctx);
 
 #ifdef __cplusplus

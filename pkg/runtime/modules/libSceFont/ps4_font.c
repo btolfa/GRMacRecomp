@@ -1919,10 +1919,10 @@ void shim_sceFontGetCharGlyphMetrics(GuestContext *ctx) {
     SHIM_RETURN();
 }
 
-// sceFontGetKerning(OrbisFontHandle font, uint32_t preCode, uint32_t code, OrbisFontKerning *kerning):
-// horizontal kerning of the pair in pixels at the font scale. A face without a kerning table, or
-// a pair it has no glyph for, has no kerning: all zero.
-void shim_sceFontGetKerning(GuestContext *ctx) {
+// Horizontal kerning of the pair (preCode, code) in pixels at the font scale (use_render: the
+// render scale), from the face's kern table and not fitted to the pixel grid. A face without a
+// kerning table, or a pair it has no glyph for, has no kerning: all zero.
+static void font_get_kerning(GuestContext *ctx, int use_render) {
     uint64_t fontGuest = ctx->rdi;
     uint32_t preCode = (uint32_t)ctx->rsi;
     uint32_t code = (uint32_t)ctx->rdx;
@@ -1930,7 +1930,7 @@ void shim_sceFontGetKerning(GuestContext *ctx) {
 
     if (!kerningGuest) {
         ctx->rax = (uint64_t)(int64_t)ORBIS_FONT_ERROR_INVALID_PARAMETER;
-        SHIM_RETURN();
+        return;
     }
     OrbisFontKerning *k = (OrbisFontKerning *)(ctx->mem_base + kerningGuest);
     memset(k, 0, sizeof(*k));
@@ -1946,17 +1946,55 @@ void shim_sceFontGetKerning(GuestContext *ctx) {
         FT_UInt left = FT_Get_Char_Index(h->ft_face, preCode);
         FT_UInt right = FT_Get_Char_Index(h->ft_face, code);
         if (left != 0 && right != 0) {
-            font_apply_ft_size(h, 0);
+            font_apply_ft_size(h, use_render);
             FT_Vector delta;
-            if (FT_Get_Kerning(h->ft_face, left, right, FT_KERNING_DEFAULT, &delta) != 0) {
+            if (FT_Get_Kerning(h->ft_face, left, right, FT_KERNING_UNFITTED, &delta) != 0) {
                 ret = ORBIS_FONT_ERROR_FATAL;
             } else {
                 k->offsetX = (float)delta.x / 64.0f;
+                k->offsetY = (float)delta.y / 64.0f;
             }
         }
     }
     pthread_mutex_unlock(&g_font_mutex);
 
+    ctx->rax = (uint64_t)(int64_t)ret;
+}
+
+// sceFontGetKerning(OrbisFontHandle font, uint32_t preCode, uint32_t code, OrbisFontKerning *kerning):
+// pair kerning at the scale set with sceFontSetScalePixel/Point.
+void shim_sceFontGetKerning(GuestContext *ctx) {
+    font_get_kerning(ctx, 0);
+    SHIM_RETURN();
+}
+
+// sceFontGetRenderScaledKerning(OrbisFontHandle font, uint32_t preCode, uint32_t code,
+// OrbisFontKerning *kerning): pair kerning at the scale set with sceFontSetupRenderScalePixel.
+void shim_sceFontGetRenderScaledKerning(GuestContext *ctx) {
+    font_get_kerning(ctx, 1);
+    SHIM_RETURN();
+}
+
+// Pixel resolution of the FreeType font driver (libSceFontFt): 64 subpixel units per pixel, the
+// 26.6 fixed point FreeType works in.
+#define FONT_FT_PIXEL_RESOLUTION 64u
+
+// sceFontGetPixelResolution(OrbisFontLib library, uint32_t *resolution): the pixel resolution of
+// the library's font driver. Every library here is created on the FreeType driver.
+void shim_sceFontGetPixelResolution(GuestContext *ctx) {
+    uint64_t libGuest = ctx->rdi;
+    uint64_t outGuest = ctx->rsi;
+
+    int32_t ret = ORBIS_FONT_OK;
+    uint32_t resolution = 0;
+    if (!libGuest || *(uint16_t *)(ctx->mem_base + libGuest) != 0x0F01) {
+        ret = ORBIS_FONT_ERROR_INVALID_LIBRARY;
+    } else if (!outGuest) {
+        ret = ORBIS_FONT_ERROR_INVALID_PARAMETER;
+    } else {
+        resolution = FONT_FT_PIXEL_RESOLUTION;
+    }
+    if (outGuest) *(uint32_t *)(ctx->mem_base + outGuest) = resolution;
     ctx->rax = (uint64_t)(int64_t)ret;
     SHIM_RETURN();
 }

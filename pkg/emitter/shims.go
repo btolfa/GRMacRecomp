@@ -1143,6 +1143,8 @@ var shimAliases = map[string]string{
 	"vRxf4d0ulPs": "shim_sceFontRenderSurfaceSetScissor",
 	"L97d+3OgMlE": "shim_sceFontGetCharGlyphMetrics",
 	"sDuhHGNhHvE": "shim_sceFontGetKerning",
+	"ryPlnDDI3rU": "shim_sceFontGetRenderScaledKerning",
+	"BozJej5T6fs": "shim_sceFontGetPixelResolution",
 	// libSceVideodec2
 	"RnDibcGCPKw": "shim_sceVideodec2QueryComputeMemoryInfo",
 	"eD+X2SmxUt4": "shim_sceVideodec2AllocateComputeQueue",
@@ -2978,6 +2980,8 @@ var knownDirectShims = []string{
 	"sceFontRenderSurfaceSetScissor",
 	"sceFontGetCharGlyphMetrics",
 	"sceFontGetKerning",
+	"sceFontGetRenderScaledKerning",
+	"sceFontGetPixelResolution",
 	// libSceVideodec2
 	"sceVideodec2QueryComputeMemoryInfo",
 	"sceVideodec2AllocateComputeQueue",

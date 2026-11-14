@@ -558,6 +558,8 @@ func TestCatherineFullBodyShimsByNID(t *testing.T) {
 		{"sceFontRenderSurfaceSetScissor", "vRxf4d0ulPs"},
 		{"sceFontGetCharGlyphMetrics", "L97d+3OgMlE"},
 		{"sceFontGetKerning", "sDuhHGNhHvE"},
+		{"sceFontGetRenderScaledKerning", "ryPlnDDI3rU"},
+		{"sceFontGetPixelResolution", "BozJej5T6fs"},
 		// libSceVideodec2 (9 from Catherine + extra)
 		{"sceVideodec2Decode", "852F5+q6+iM"},
 		{"sceVideodec2CreateDecoder", "CNNRoRYd8XI"},

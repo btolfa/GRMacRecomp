@@ -302,6 +302,42 @@ int32_t sceNpUnregisterPlusEventCallback(void) {
     return 0;
 }
 
+// The reachability callback reports changes of the user's NP reachability. A signed-out user
+// stays unreachable, so the callback is stored and never fires.
+static void* g_reachability_cb = NULL;
+static void* g_reachability_cb_userdata = NULL;
+
+int32_t sceNpRegisterNpReachabilityStateCallback(void* callback, void* userdata) {
+    if (!callback) {
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT;
+    }
+    if (g_reachability_cb != NULL) {
+        return ORBIS_NP_ERROR_CALLBACK_ALREADY_REGISTERED;
+    }
+    g_reachability_cb = callback;
+    g_reachability_cb_userdata = userdata;
+    NP_LOG("sceNpRegisterNpReachabilityStateCallback -> ORBIS_OK");
+    return 0;
+}
+
+int32_t sceNpUnregisterNpReachabilityStateCallback(void) {
+    if (g_reachability_cb == NULL) {
+        return ORBIS_NP_ERROR_CALLBACK_NOT_REGISTERED;
+    }
+    g_reachability_cb = NULL;
+    g_reachability_cb_userdata = NULL;
+    return 0;
+}
+
+// No local user is signed in to PSN, so no user has an online ID.
+int32_t sceNpGetUserIdByOnlineId(const OrbisNpOnlineId* online_id, int32_t* user_id) {
+    if (!online_id || !user_id) {
+        return ORBIS_NP_ERROR_INVALID_ARGUMENT;
+    }
+    NP_LOG("sceNpGetUserIdByOnlineId -> SIGNED_OUT");
+    return ORBIS_NP_ERROR_SIGNED_OUT;
+}
+
 static void* g_game_presence_cb = NULL;
 static void* g_game_presence_cb_userdata = NULL;
 
@@ -514,6 +550,25 @@ void shim_sceNpRegisterPlusEventCallback(GuestContext *ctx) {
 
 void shim_sceNpUnregisterPlusEventCallback(GuestContext *ctx) {
     ctx->rax = (uint64_t)(int64_t)sceNpUnregisterPlusEventCallback();
+    SHIM_RETURN();
+}
+
+void shim_sceNpRegisterNpReachabilityStateCallback(GuestContext *ctx) {
+    void* cb = NP_GPTR(ctx, ctx->rdi);
+    void* udata = NP_GPTR(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceNpRegisterNpReachabilityStateCallback(cb, udata);
+    SHIM_RETURN();
+}
+
+void shim_sceNpUnregisterNpReachabilityStateCallback(GuestContext *ctx) {
+    ctx->rax = (uint64_t)(int64_t)sceNpUnregisterNpReachabilityStateCallback();
+    SHIM_RETURN();
+}
+
+void shim_sceNpGetUserIdByOnlineId(GuestContext *ctx) {
+    const OrbisNpOnlineId* id = (const OrbisNpOnlineId*)NP_GPTR(ctx, ctx->rdi);
+    int32_t* user_id = (int32_t*)NP_GPTR(ctx, ctx->rsi);
+    ctx->rax = (uint64_t)(int64_t)sceNpGetUserIdByOnlineId(id, user_id);
     SHIM_RETURN();
 }
 

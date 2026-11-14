@@ -639,6 +639,7 @@ void shim_pthread_attr_init(GuestContext *ctx) {
     SHIM_RETURN();
   }
   attr->stacksize_attr = 2 * 1024 * 1024;
+  attr->guardsize_attr = 16 * 1024; // libthr: one page (_thr_guard_default)
   attr->sched_policy = 2; // Other
   attr->prio = 700;
   *(uint64_t *)(ctx->mem_base + attr_addr) = (uint64_t)attr;
@@ -691,6 +692,21 @@ void shim_pthread_attr_setstacksize(GuestContext *ctx) {
     SHIM_RETURN();
   }
   attr->stacksize_attr = stacksize;
+  ctx->rax = 0;
+  SHIM_RETURN();
+}
+
+// pthread_attr_setguardsize (libthr): records the size; any size is valid. The runtime's
+// thread stacks have no guard region yet, so the size is not applied at thread creation.
+void shim_pthread_attr_setguardsize(GuestContext *ctx) {
+  uint64_t attr_addr = ctx->rdi;
+  PthreadAttr *attr =
+      attr_addr ? (PthreadAttr *)(*(uint64_t *)(ctx->mem_base + attr_addr)) : NULL;
+  if (!attr) {
+    ctx->rax = (uint64_t)EINVAL;
+    SHIM_RETURN();
+  }
+  attr->guardsize_attr = (size_t)ctx->rsi;
   ctx->rax = 0;
   SHIM_RETURN();
 }
@@ -905,6 +921,11 @@ void shim_scePthreadAttrDestroy(GuestContext *ctx) {
 
 void shim_scePthreadAttrSetstacksize(GuestContext *ctx) {
   shim_pthread_attr_setstacksize(ctx);
+  SCE_PTHREAD_ERR(ctx);
+}
+
+void shim_scePthreadAttrSetguardsize(GuestContext *ctx) {
+  shim_pthread_attr_setguardsize(ctx);
   SCE_PTHREAD_ERR(ctx);
 }
 

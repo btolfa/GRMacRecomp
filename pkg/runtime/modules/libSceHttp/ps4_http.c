@@ -350,6 +350,38 @@ int32_t sceHttpSetConnectTimeOut(int32_t id, uint32_t usec) {
     return 0;
 }
 
+// Name resolution and redirects only shape a request that reaches the network; offline every
+// request fails with ORBIS_HTTP_ERROR_NETWORK first, so these settings take effect nowhere.
+int32_t sceHttpSetResolveTimeOut(int32_t id, uint32_t usec) {
+    (void)id;
+    (void)usec;
+    return 0;
+}
+
+int32_t sceHttpSetResolveRetry(int32_t id, int32_t retry) {
+    (void)id;
+    (void)retry;
+    return 0;
+}
+
+int32_t sceHttpSetAutoRedirect(int32_t id, int32_t isEnable) {
+    (void)id;
+    (void)isEnable;
+    return 0;
+}
+
+// The SSL error of the last request: requests fail before a TLS handshake starts, so none.
+int32_t sceHttpsGetSslError(int32_t id, int32_t *errNum, uint32_t *detail) {
+    (void)id;
+    if (errNum) {
+        *errNum = 0;
+    }
+    if (detail) {
+        *detail = 0;
+    }
+    return 0;
+}
+
 int32_t sceHttpSetSendTimeOut(int32_t id, uint32_t usec) {
     (void)id;
     (void)usec;
@@ -626,6 +658,27 @@ void shim_sceHttpCreateRequest2(GuestContext *ctx) {
 
 void shim_sceHttpSetConnectTimeOut(GuestContext *ctx) {
     ctx->rax = (uint64_t)sceHttpSetConnectTimeOut((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetResolveTimeOut(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetResolveTimeOut((int32_t)ctx->rdi, (uint32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetResolveRetry(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetResolveRetry((int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpSetAutoRedirect(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpSetAutoRedirect((int32_t)ctx->rdi, (int32_t)ctx->rsi);
+    SHIM_RETURN();
+}
+
+void shim_sceHttpsGetSslError(GuestContext *ctx) {
+    ctx->rax = (uint64_t)sceHttpsGetSslError((int32_t)ctx->rdi, (int32_t *)guest_to_host(ctx, ctx->rsi),
+                                             (uint32_t *)guest_to_host(ctx, ctx->rdx));
     SHIM_RETURN();
 }
 

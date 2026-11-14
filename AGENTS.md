@@ -1,41 +1,36 @@
 # GRMacRecomp
 
-Ahead-of-time static recompiler that turns Gravity Rush Remastered (PS4, `CUSA01113`) into a native macOS ARM64 app.
-Fork of [PS4Recomp](https://github.com/wie-project/PS4Recomp); the `main` branch mirrors upstream.
+Gravity Rush Remastered (PS4, `CUSA01113`) recompiled ahead of time into a native macOS ARM64 app.
+Fork of [PS4Recomp](https://github.com/wie-project/PS4Recomp).
 
-## Scope
+## Upstreamable fixes
 
-- Gravity Rush Remastered is the target. Other titles are upstream's concern.
-- Fix behavior in the generic recompiler and runtime, not for one executable. No title-ID checks or
-  Gravity Rush special cases in `pkg/lifter`, `pkg/disasm`, `pkg/emitter` or `pkg/runtime`. Code
-  specific to Gravity Rush belongs in tests and patch XML only. This keeps fixes upstreamable.
-- The project must not turn into a JIT emulator. Guest code is translated ahead of time.
+Fix the generic lifter, disassembler, emitter and runtime so that any PS4 title gets the same
+behavior; Gravity Rush specifics live only in tests and patch XML. Guest code is translated ahead of
+time: the runtime runs recompiled code and never generates it (no JIT).
 
-## Honesty
+## Honest work
 
-- No cheating: no tests that pass without checking anything, no faked results, no Python runs in an
-  isolated directory standing in for the real build.
-- No temporary solutions and no stubs that return 0 in place of a real implementation.
-- A skipped test is not a pass. Tests that need the game skip unless `PS4_GR_EBOOT` points to the
-  Gravity Rush Remastered `eboot.bin`; report them as skipped.
-- Tell the user about problems instead of hiding them. Being deceived upsets the user more than bad news.
+- Each implementation does what Orbis does. When it can't yet, report the gap to the user rather than
+  return a placeholder value.
+- Verify against the real build and the game's `eboot.bin`; a script in a scratch directory proves nothing.
+- Report problems and dead ends to the user when you hit them. The user prefers bad news to a hidden
+  workaround.
 
-## Work size
+## Steps and done
 
-- Never try to do the whole project in one step, and do not split work into microtasks that are not
-  worth a separate step.
+Each step lands one meaningful, verifiable change: bigger than a microtask, much smaller than the project.
+A step is done when:
 
-## Code
+- `go vet ./...` and `go test -count=1 ./...` are clean;
+- tests gated on `PS4_GR_EBOOT` (path of the game's `eboot.bin`) have run, or you report them as
+  skipped. A skip is not a pass;
+- allocations on changed hot paths are checked with `go test -benchmem` and escape analysis
+  (`go build -gcflags=-m`).
 
-- Comments, README and documentation in English only.
-- Run `go vet ./...` and `go test -count=1 ./...` before calling a change done.
-- Keep the code clean and allocations minimal; check with the Go analysis tools.
+## Conventions
 
-## Branches
-
-- Feature work goes on `gr/<topic>` branches and is merged into `gravity_rush`, the default branch of the fork.
-- `main` follows `wie-project/PS4Recomp`; do not commit fork-only work there.
-
-## Network
-
-- Internet use is allowed. Ask the user before downloading anything; they usually agree.
+- Write comments, docs and commit messages in English.
+- Branch work as `gr/<topic>` and merge it into `gravity_rush`, the fork's default branch. `main`
+  mirrors `wie-project/PS4Recomp`.
+- Using the internet is fine; ask the user before downloading anything.

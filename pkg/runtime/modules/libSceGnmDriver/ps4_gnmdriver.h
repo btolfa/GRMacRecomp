@@ -60,6 +60,7 @@ extern "C" {
 #define PM4_IT_WAIT_REG_MEM               0x3C
 #define PM4_IT_EVENT_WRITE                0x46
 #define PM4_IT_EVENT_WRITE_EOP            0x47
+#define PM4_IT_ACQUIRE_MEM                0x58
 #define PM4_IT_SET_CONFIG_REG             0x68
 #define PM4_IT_SET_CONTEXT_REG            0x69
 #define PM4_IT_SET_SH_REG                 0x76

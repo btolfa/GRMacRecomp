@@ -9,6 +9,7 @@
 #include "ps4_videoout.h"
 #include "ps4_gnm_metal.h"
 #include "ps4_equeue.h"
+#include "ps4_kernel_sys.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -295,11 +296,37 @@ uint32_t sceGnmDrawInitToDefaultContextState400(uint32_t *cmdbuf, uint32_t size)
     return PM4_CTX_INIT_PACKET_SIZE_400;
 }
 
+static inline uint32_t *set_compute_sh_reg(uint32_t *cmdbuf, uint32_t reg, uint32_t value) {
+    cmdbuf[0] = PM4_TYPE3_HEADER(PM4_IT_SET_SH_REG, 1, 1, 0);
+    cmdbuf[1] = reg;
+    cmdbuf[2] = value;
+    return cmdbuf + 3;
+}
+
+// Writes the compute default state into a block of PM4_HW_INIT_PACKET_SIZE dwords and returns
+// that size. size is the space the caller has left in its command buffer, not the size to fill:
+// Gnmx passes everything up to the end of the buffer.
 uint32_t sceGnmDispatchInitDefaultHardwareState(uint32_t *cmdbuf, uint32_t size) {
-    if (!cmdbuf || size < 4) return 0;
-    cmdbuf[0] = PM4_TYPE3_HEADER(PM4_IT_NOP, size - 2, 1, 0);
-    memset(cmdbuf + 1, 0, (size - 1) * sizeof(uint32_t));
-    return size;
+    if (!cmdbuf || size < PM4_HW_INIT_PACKET_SIZE) return 0;
+    uint32_t *cur = cmdbuf;
+    cur = set_compute_sh_reg(cur, 0x216u, 0xffffffffu); // COMPUTE_STATIC_THREAD_MGMT_SE0
+    cur = set_compute_sh_reg(cur, 0x217u, 0xffffffffu); // COMPUTE_STATIC_THREAD_MGMT_SE1
+    if (sceKernelIsNeoMode()) {
+        cur = set_compute_sh_reg(cur, 0x219u, 0xffffffffu); // COMPUTE_STATIC_THREAD_MGMT_SE2
+        cur = set_compute_sh_reg(cur, 0x21au, 0xffffffffu); // COMPUTE_STATIC_THREAD_MGMT_SE3
+    }
+    cur = set_compute_sh_reg(cur, 0x215u, 0x170u); // COMPUTE_RESOURCE_LIMITS
+    // ACQUIRE_MEM with the cache actions and poll interval the firmware writes.
+    cur[0] = PM4_TYPE3_HEADER(PM4_IT_ACQUIRE_MEM, 5, 0, 0);
+    cur[1] = 0x28000000u; // CP_COHER_CNTL
+    cur[2] = 0;           // CP_COHER_SIZE
+    cur[3] = 0;           // CP_COHER_SIZE_HI
+    cur[4] = 0;           // CP_COHER_BASE
+    cur[5] = 0;           // CP_COHER_BASE_HI
+    cur[6] = 0xau;        // POLL_INTERVAL
+    cur += 7;
+    write_trailing_nop(cur, (uint32_t)(cmdbuf + PM4_HW_INIT_PACKET_SIZE - cur - 1));
+    return PM4_HW_INIT_PACKET_SIZE;
 }
 
 int32_t sceGnmResetVgtControl(uint32_t *cmdbuf, uint32_t size) {

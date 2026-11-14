@@ -43,7 +43,7 @@ func TestDiscoverModulesDirectory(t *testing.T) {
 
 	img := append([]byte{0, 0, 0, 0}, []byte("%s/Modules/Il2CppUserAssemblies.prx\x00")...)
 	// Discover with empty appDir, but elfPath pointing to eboot.bin in dir
-	refs := DiscoverCompanionModules(filepath.Join(dir, "eboot.bin"), "", img)
+	refs := DiscoverCompanionModules(filepath.Join(dir, "eboot.bin"), AppRoots{}, img)
 	if len(refs) != 1 {
 		t.Fatalf("expected 1 module, got %+v", refs)
 	}
@@ -73,7 +73,7 @@ func TestDiscoverResolvesApp0(t *testing.T) {
 		t.Fatal(err)
 	}
 	img := append([]byte{0, 0, 0, 0}, []byte("/app0/sce_module/libExample.prx\x00")...)
-	refs := DiscoverCompanionModules("", dir, img)
+	refs := DiscoverCompanionModules("", AppRoots{Base: dir}, img)
 	if len(refs) != 1 {
 		t.Fatalf("expected 1 module, got %+v", refs)
 	}
@@ -114,7 +114,7 @@ func TestDiscoverPrxDir(t *testing.T) {
 	if err := os.WriteFile(plugin, []byte("stub"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	refs := DiscoverCompanionModules("", dir, nil)
+	refs := DiscoverCompanionModules("", AppRoots{Base: dir}, nil)
 	found := false
 	for _, ref := range refs {
 		if filepath.Base(ref.Path) == "akplugin.prx" {
@@ -137,7 +137,7 @@ func TestDiscoverRecursivePrx(t *testing.T) {
 	if err := os.WriteFile(plugin, []byte("stub"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	refs := DiscoverCompanionModules(filepath.Join(dir, "eboot.bin"), "", nil)
+	refs := DiscoverCompanionModules(filepath.Join(dir, "eboot.bin"), AppRoots{}, nil)
 	found := false
 	for _, ref := range refs {
 		if filepath.Base(ref.Path) == "custom_plugin.prx" {

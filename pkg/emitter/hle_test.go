@@ -165,7 +165,7 @@ func TestPrintHogwartsNetworkUnresolved(t *testing.T) {
 		t.Skip(err)
 	}
 	appDir := filepath.Dir(path)
-	refs := elfloader.DiscoverCompanionModules(path, appDir, loaded.MemoryImage)
+	refs := elfloader.DiscoverCompanionModules(path, elfloader.AppRoots{Base: appDir}, loaded.MemoryImage)
 	var modules []GuestModule
 	nextBase := (loaded.MaxVAddr + 0xFFFF) &^ 0xFFFF
 	for _, ref := range refs {

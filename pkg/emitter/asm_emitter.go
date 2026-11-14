@@ -75,6 +75,7 @@ type AsmEmitter struct {
 	lifter    *lifter.Arm64Lifter
 	shimMap   map[uint64]string
 	AppDir    string
+	PatchDir  string // installed update layered over AppDir; "" when none
 	Modules   []GuestModule
 	ChunkSize int
 	// Workers bounds the goroutines that emit chunks in parallel. Zero uses NumCPU.
@@ -683,10 +684,14 @@ func (e *AsmEmitter) EmitMainRunner(path string) error {
 		return err
 	}
 
-	vfsInitArg := "NULL"
-	if e.AppDir != "" {
-		vfsInitArg = fmt.Sprintf("%q", e.AppDir)
+	// ps4_vfs_init(app_root, patch_root): build-time hints the environment can override.
+	cStringOrNull := func(s string) string {
+		if s == "" {
+			return "NULL"
+		}
+		return fmt.Sprintf("%q", s)
 	}
+	vfsInitArg := cStringOrNull(e.AppDir) + ", " + cStringOrNull(e.PatchDir)
 
 	content := fmt.Sprintf(`#include "recomp_runtime.h"
 #include "ps4_vfs.h"

@@ -14,8 +14,17 @@ extern "C" {
 // Base threshold for virtual archive file descriptors
 #define PS4_VFS_VIRTUAL_FD_BASE 10000
 
-// Initialize VFS with host directory path corresponding to /app0
-void ps4_vfs_init(const char *app_root);
+// Initialize VFS with the host directory of /app0 and the installed update layered over it per
+// file (NULL when none). PS4_APP_DIR and PS4_PATCH_DIR override the hints.
+void ps4_vfs_init(const char *app_root, const char *patch_root);
+
+// Returns the update root layered over the app root, or NULL when there is none
+const char *ps4_vfs_get_patch_root(void);
+
+// For a host directory inside the update root, writes the base application's directory at the
+// same /app0 path, so that a listing shows both. Returns 0, or -ENOENT when host_dir is not in
+// the update or the base has no such directory.
+int ps4_vfs_lower_dir(const char *host_dir, char *out, size_t out_sz);
 
 // Returns the current app root path
 const char *ps4_vfs_get_app_root(void);

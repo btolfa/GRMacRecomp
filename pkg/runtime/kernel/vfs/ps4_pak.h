@@ -16,8 +16,9 @@ typedef struct {
     uint32_t compression;
 } ps4_pak_entry_t;
 
-// Initialize PAK provider by scanning app_root for .pak files
-void ps4_pak_init(const char *app_root);
+// Initialize PAK provider by scanning app_root, then the update in patch_root (may be NULL), for
+// .pak files
+void ps4_pak_init(const char *app_root, const char *patch_root);
 
 // Lookup a relative subpath (e.g. "engine/content/internationalization/icudt64l/lang/en.res")
 // Returns true if found and fills out_entry.

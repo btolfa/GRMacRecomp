@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"ps4-recomp/pkg/elfloader"
 	"ps4-recomp/pkg/events"
 )
 
@@ -194,7 +195,7 @@ func TestRunBinaryStdoutGoesToLog(t *testing.T) {
 	logw, stdout = &log, &bytes.Buffer{}
 	defer func() { logw, stdout = oldLog, oldOut }()
 
-	if err := runBinary(context.Background(), "/bin/echo", 0, ""); err != nil {
+	if err := runBinary(context.Background(), "/bin/echo", 0, elfloader.AppRoots{}); err != nil {
 		t.Fatal(err)
 	}
 	if got := stdout.(*bytes.Buffer).String(); got != "" {
@@ -339,3 +340,41 @@ func TestBundleDylibDependenciesRpathAndLoaderPath(t *testing.T) {
 	}
 }
 
+
+// -patch-dir layers an update over the base game: its eboot.bin is recompiled unless -elf names
+// one, and it needs the base.
+func TestParseArgsPatchDir(t *testing.T) {
+	base, patch := t.TempDir(), t.TempDir()
+	for _, p := range []string{filepath.Join(base, "eboot.bin"), filepath.Join(patch, "eboot.bin"),
+		filepath.Join(base, "sce_sys", "param.sfo")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := ParseArgs([]string{"build", base, "--patch-dir", patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ElfPath != filepath.Join(patch, "eboot.bin") {
+		t.Errorf("ElfPath = %q, want the update's eboot.bin", cfg.ElfPath)
+	}
+	if r := cfg.Roots(); r.Patch != patch || r.Base == "" {
+		t.Errorf("Roots = %+v", r)
+	}
+	cfg, err = ParseArgs([]string{"build", "-e", filepath.Join(base, "eboot.bin"), "--app-dir", base, "--patch-dir", patch})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ElfPath != filepath.Join(base, "eboot.bin") {
+		t.Errorf("with -elf, ElfPath = %q, want it kept", cfg.ElfPath)
+	}
+	if _, err := ParseArgs([]string{"build", base, "--patch-dir", filepath.Join(patch, "missing")}); err == nil {
+		t.Error("a missing -patch-dir was accepted")
+	}
+	if _, err := ParseArgs([]string{"build", base, "--patch-dir", patch, "--standalone"}); err == nil {
+		t.Error("-standalone with -patch-dir was accepted")
+	}
+}

@@ -210,29 +210,30 @@ func thisAppModuleDirs(elfPath, appDir string) []string {
 	return dirs
 }
 
-// DiscoverCompanionModules finds PRX/SPRX files that belong to this app:
-// files in <appDir>/sce_module, and guest paths such as /app0/sce_module/foo.prx
-// resolved through MapGuestPath. It does not search sibling projects.
-func DiscoverCompanionModules(elfPath, appDir string, image []byte) []ModuleRef {
-	if appDir == "" && elfPath != "" {
-		appDir = filepath.Dir(elfPath)
+// DiscoverCompanionModules finds PRX/SPRX files that belong to this app: files under the app
+// roots (for example <base>/sce_module), and guest paths such as /app0/sce_module/foo.prx. A module
+// present in both roots is taken from the patch. It does not search sibling projects.
+func DiscoverCompanionModules(elfPath string, roots AppRoots, image []byte) []ModuleRef {
+	if roots.Base == "" && elfPath != "" {
+		roots.Base = filepath.Dir(elfPath)
 	}
+	roots.Base, roots.Patch = canonicalDir(roots.Base), canonicalDir(roots.Patch)
 	seen := make(map[string]struct{})
 	var out []ModuleRef
+	add := func(path string, aliases ...string) {
+		addModuleRef(&out, seen, roots.Overlay(path), aliases...)
+	}
 
 	// Walk application roots recursively to find all companion .prx/.sprx files
-	var roots []string
-	if appDir != "" {
-		roots = append(roots, appDir)
-	}
+	walkRoots := roots.dirs()
 	if elfPath != "" {
-		dir := filepath.Dir(elfPath)
-		if dir != appDir {
-			roots = append(roots, dir)
+		dir := canonicalDir(filepath.Dir(elfPath))
+		if !slices.Contains(walkRoots, dir) {
+			walkRoots = append(walkRoots, dir)
 		}
 	}
 
-	for _, root := range roots {
+	for _, root := range walkRoots {
 		_ = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return nil
@@ -253,32 +254,47 @@ func DiscoverCompanionModules(elfPath, appDir string, image []byte) []ModuleRef 
 			}
 			ext := strings.ToLower(filepath.Ext(name))
 			if ext == ".prx" || ext == ".sprx" {
-				addModuleRef(&out, seen, path, name)
+				add(path, name)
 			}
 			return nil
 		})
 	}
 
 	for _, ref := range ReferencedModuleNames(image) {
-		mapped := MapGuestPath(ref, appDir)
+		mapped := MapGuestPath(ref, roots.Base)
 		if mapped != "" {
-			addModuleRef(&out, seen, mapped, filepath.Base(ref))
+			add(mapped, filepath.Base(ref))
 		}
 		cleanRef := strings.TrimPrefix(strings.ReplaceAll(ref, "\\", "/"), "%s/")
 		if cleanRef != ref {
-			mappedClean := MapGuestPath(cleanRef, appDir)
+			mappedClean := MapGuestPath(cleanRef, roots.Base)
 			if mappedClean != "" {
-				addModuleRef(&out, seen, mappedClean, filepath.Base(cleanRef))
+				add(mappedClean, filepath.Base(cleanRef))
 			}
 		}
-		for _, dir := range thisAppModuleDirs(elfPath, appDir) {
-			addModuleRef(&out, seen, filepath.Join(dir, filepath.Base(ref)), filepath.Base(ref))
+		for _, dir := range thisAppModuleDirs(elfPath, roots.Base) {
+			add(filepath.Join(dir, filepath.Base(ref)), filepath.Base(ref))
 			if cleanRef != ref {
-				addModuleRef(&out, seen, filepath.Join(dir, filepath.Base(cleanRef)), filepath.Base(cleanRef))
+				add(filepath.Join(dir, filepath.Base(cleanRef)), filepath.Base(cleanRef))
 			}
 		}
 	}
 	return out
+}
+
+// canonicalDir returns dir as an absolute path with symlinks resolved, so that paths found under
+// it compare equal to the same paths reached another way.
+func canonicalDir(dir string) string {
+	if dir == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if realPath, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = realPath
+	}
+	return dir
 }
 
 // Overlaps reports whether two loaded images share any virtual address bytes.

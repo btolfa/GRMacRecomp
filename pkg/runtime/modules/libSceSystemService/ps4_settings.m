@@ -61,17 +61,15 @@ static int lang_from_name(const char *s) {
 // Languages with a speech pack in the game data; falls back to English only.
 static int available_langs(int *idx, int max) {
     int n = 0;
-    const char *root = ps4_vfs_get_app_root();
-    char dir[2048];
-    snprintf(dir, sizeof(dir), "%s/build/ps4/main/sound1/streams/speech", root ? root : ".");
+    const char *dir = "/app0/build/ps4/main/sound1/streams/speech";
     for (int i = 0; i < NLANGS && n < max; i++) {
-        char p[2300];
+        char p[512];
         struct stat st;
         snprintf(p, sizeof(p), "%s/%s-sp.psarc", dir, kLangs[i].pack);
-        int ok = stat(p, &st) == 0;
+        int ok = ps4_vfs_stat(p, &st) == 0;
         if (!ok) {
             snprintf(p, sizeof(p), "%s/%s", dir, kLangs[i].pack);
-            ok = stat(p, &st) == 0;
+            ok = ps4_vfs_stat(p, &st) == 0;
         }
         if (ok) idx[n++] = i;
     }

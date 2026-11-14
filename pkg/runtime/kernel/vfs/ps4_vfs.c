@@ -18,6 +18,8 @@
 #endif
 
 static char *g_app_root = NULL;
+// Installed update layered over g_app_root per file (Orbis /app0 with a patch); NULL when none.
+static char *g_patch_root = NULL;
 static pthread_mutex_t g_vfs_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define MAX_VIRTUAL_FILES 256
@@ -173,12 +175,30 @@ typedef struct {
 static VfsMount g_mounts[MAX_VFS_MOUNTS];
 static int g_mount_count = 0;
 
-void ps4_vfs_init(const char *app_root) {
+// The update directory: PS4_PATCH_DIR, else the build-time hint. A configured directory that
+// does not exist is a fatal error: running the base game in its place would be a different game.
+static char *configured_patch_root(const char *hint) {
+  const char *env = getenv("PS4_PATCH_DIR");
+  const char *dir = (env && *env) ? env : hint;
+  if (!dir || !*dir)
+    return NULL;
+  char resolved[1024];
+  if (realpath(dir, resolved) == NULL) {
+    fprintf(stderr, "[ps4-vfs] FATAL: update directory '%s' is not accessible: %s\n", dir,
+            strerror(errno));
+    exit(1);
+  }
+  return strdup(resolved);
+}
+
+void ps4_vfs_init(const char *app_root, const char *patch_root) {
   pthread_mutex_lock(&g_vfs_mutex);
   if (g_app_root) {
     free(g_app_root);
     g_app_root = NULL;
   }
+  free(g_patch_root);
+  g_patch_root = configured_patch_root(patch_root);
 
   g_app_root = discover_app_root(app_root);
 
@@ -193,6 +213,8 @@ void ps4_vfs_init(const char *app_root) {
 
   printf("[ps4-vfs] Application root: %s\n",
          g_app_root ? g_app_root : "(null)");
+  if (g_patch_root)
+    printf("[ps4-vfs] Update root: %s (layered over the application root)\n", g_patch_root);
 
   memset(g_mounts, 0, sizeof(g_mounts));
   g_mount_count = 0;
@@ -204,8 +226,10 @@ void ps4_vfs_init(const char *app_root) {
   pthread_mutex_unlock(&g_vfs_mutex);
 
   // Initialize universal PAK provider
-  ps4_pak_init(g_app_root);
+  ps4_pak_init(g_app_root, g_patch_root);
 }
+
+const char *ps4_vfs_get_patch_root(void) { return g_patch_root; }
 
 const char *ps4_vfs_get_app_root(void) {
   pthread_mutex_lock(&g_vfs_mutex);
@@ -313,6 +337,14 @@ static void normalize_chroot_subpath(const char *subpath, char *out,
     out[written] = '\0';
   }
   out[written] = '\0';
+}
+
+// root/sub, or root itself when sub is empty.
+static void join_root(char *out, size_t out_sz, const char *root, const char *sub) {
+  if (sub[0])
+    snprintf(out, out_sz, "%s/%s", root, sub);
+  else
+    snprintf(out, out_sz, "%s", root);
 }
 
 static int case_insensitive_lookup(const char *host_path, char *out_path,
@@ -427,6 +459,10 @@ int ps4_vfs_resolve(const char *guest_path, char *host_path,
   const char *root = g_app_root ? g_app_root : ".";
   char raw_host[1024];
   raw_host[0] = '\0';
+  // An /app0 path, relative to the root: the update's file when it has one, else the base's.
+  char app_sub[1024];
+  app_sub[0] = '\0';
+  int is_app = 0;
 
   for (int i = 0; i < g_mount_count; i++) {
     if (!g_mounts[i].active)
@@ -456,27 +492,15 @@ int ps4_vfs_resolve(const char *guest_path, char *host_path,
       const char *subpath = guest_path + 5;
       while (*subpath == '/')
         subpath++;
-
-      char norm_subpath[1024];
-      normalize_chroot_subpath(subpath, norm_subpath, sizeof(norm_subpath));
-      if (norm_subpath[0]) {
-        snprintf(raw_host, sizeof(raw_host), "%s/%s", root, norm_subpath);
-      } else {
-        snprintf(raw_host, sizeof(raw_host), "%s", root);
-      }
+      normalize_chroot_subpath(subpath, app_sub, sizeof(app_sub));
+      is_app = 1;
     } else if (strncmp(guest_path, "/hostapp", 8) == 0 &&
                (guest_path[8] == '/' || guest_path[8] == '\0')) {
       const char *subpath = guest_path + 8;
       while (*subpath == '/')
         subpath++;
-
-      char norm_subpath[1024];
-      normalize_chroot_subpath(subpath, norm_subpath, sizeof(norm_subpath));
-      if (norm_subpath[0]) {
-        snprintf(raw_host, sizeof(raw_host), "%s/%s", root, norm_subpath);
-      } else {
-        snprintf(raw_host, sizeof(raw_host), "%s", root);
-      }
+      normalize_chroot_subpath(subpath, app_sub, sizeof(app_sub));
+      is_app = 1;
     } else if (strncmp(guest_path, "/data", 5) == 0 &&
                (guest_path[5] == '/' || guest_path[5] == '\0')) {
       const char *subpath = guest_path + 5;
@@ -491,21 +515,55 @@ int ps4_vfs_resolve(const char *guest_path, char *host_path,
         snprintf(raw_host, sizeof(raw_host), "%s/data", root);
       }
     } else if (guest_path[0] != '/') {
-      char norm_subpath[1024];
-      normalize_chroot_subpath(guest_path, norm_subpath, sizeof(norm_subpath));
-      if (norm_subpath[0]) {
-        snprintf(raw_host, sizeof(raw_host), "%s/%s", root, norm_subpath);
-      } else {
-        snprintf(raw_host, sizeof(raw_host), "%s", root);
-      }
+      normalize_chroot_subpath(guest_path, app_sub, sizeof(app_sub));
+      is_app = 1;
     } else {
       strncpy(raw_host, guest_path, sizeof(raw_host) - 1);
       raw_host[sizeof(raw_host) - 1] = '\0';
     }
   }
+  if (is_app) {
+    if (g_patch_root) {
+      char patch_host[1024];
+      join_root(patch_host, sizeof(patch_host), g_patch_root, app_sub);
+      if (case_insensitive_lookup(patch_host, host_path, host_path_sz) == 0 &&
+          access(host_path, F_OK) == 0) {
+        pthread_mutex_unlock(&g_vfs_mutex);
+        return 0;
+      }
+    }
+    join_root(raw_host, sizeof(raw_host), root, app_sub);
+  }
   pthread_mutex_unlock(&g_vfs_mutex);
 
   return case_insensitive_lookup(raw_host, host_path, host_path_sz);
+}
+
+int ps4_vfs_lower_dir(const char *host_dir, char *out, size_t out_sz) {
+  pthread_mutex_lock(&g_vfs_mutex);
+  if (!g_patch_root || !g_app_root || !host_dir) {
+    pthread_mutex_unlock(&g_vfs_mutex);
+    return -ENOENT;
+  }
+  size_t plen = strlen(g_patch_root);
+  if (strncmp(host_dir, g_patch_root, plen) != 0 ||
+      (host_dir[plen] != '/' && host_dir[plen] != '\0')) {
+    pthread_mutex_unlock(&g_vfs_mutex);
+    return -ENOENT;
+  }
+  const char *sub = host_dir + plen;
+  while (*sub == '/')
+    sub++;
+  char raw[1024];
+  join_root(raw, sizeof(raw), g_app_root, sub);
+  pthread_mutex_unlock(&g_vfs_mutex);
+  struct stat st;
+  int rc = case_insensitive_lookup(raw, out, out_sz);
+  if (rc != 0)
+    return rc;
+  if (stat(out, &st) != 0 || !S_ISDIR(st.st_mode))
+    return -ENOENT;
+  return 0;
 }
 
 static const char *get_app0_subpath(const char *guest_path) {

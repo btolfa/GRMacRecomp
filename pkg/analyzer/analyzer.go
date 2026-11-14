@@ -88,7 +88,7 @@ func AnalyzeBinarySeeded(path string, allSymbols bool) (*AnalysisReport, error) 
 	}
 	seedCount := len(queue)
 
-	refs := elfloader.DiscoverCompanionModules(path, "", loaded.MemoryImage)
+	refs := elfloader.DiscoverCompanionModules(path, elfloader.AppRoots{}, loaded.MemoryImage)
 	var modules []emitter.GuestModule
 	for _, ref := range refs {
 		mod, err := elfloader.LoadELF(ref.Path)

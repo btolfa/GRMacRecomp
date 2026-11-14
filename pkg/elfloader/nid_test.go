@@ -118,7 +118,7 @@ func TestHogwartsFullCanaryInGuestImage(t *testing.T) {
 	if err != nil {
 		t.Skip(err)
 	}
-	refs := DiscoverCompanionModules(ebootPath, appDir, main.MemoryImage)
+	refs := DiscoverCompanionModules(ebootPath, AppRoots{Base: appDir}, main.MemoryImage)
 	var allCompanionExports []Symbol
 	nextBase := (main.MaxVAddr + 0xFFFF) &^ 0xFFFF
 	for _, ref := range refs {

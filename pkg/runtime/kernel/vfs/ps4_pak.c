@@ -143,7 +143,6 @@ static bool parse_pak_file(const char *pak_path) {
     }
 
     const uint8_t *footer = &tail[magic_pos];
-    uint32_t ver = *(const uint32_t *)(footer + 4);
     uint64_t idx_off = *(const uint64_t *)(footer + 8);
     uint64_t idx_sz = *(const uint64_t *)(footer + 16);
 
@@ -363,7 +362,7 @@ static void scan_dir_for_paks_recursive(const char *dir_path, int depth) {
     closedir(dir);
 }
 
-void ps4_pak_init(const char *app_root) {
+void ps4_pak_init(const char *app_root, const char *patch_root) {
     pthread_mutex_lock(&g_pak_mutex);
     if (g_entries != NULL) {
         pthread_mutex_unlock(&g_pak_mutex);
@@ -373,6 +372,8 @@ void ps4_pak_init(const char *app_root) {
     if (!app_root || !*app_root) app_root = ".";
 
     scan_dir_for_paks_recursive(app_root, 0);
+    // Entries indexed later replace earlier ones: the update's archives win.
+    if (patch_root && *patch_root) scan_dir_for_paks_recursive(patch_root, 0);
 
     printf("[ps4-pak] Total indexed files across all paks: %zu\n", g_entry_count);
     pthread_mutex_unlock(&g_pak_mutex);

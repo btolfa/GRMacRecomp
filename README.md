@@ -108,9 +108,20 @@ Once built, launch the game by double-clicking `<GameName>.app` in Finder, or ru
 | `--standalone`          | Create a self-contained macOS `.app` bundle with bundled dylibs and resources | `false`       |
 | `--tso`                 | x86 Total Store Order memory model (acquire/release semantics)                | `true`        |
 | `--app-dir <dir>`       | Host directory mapping to `/app0` for game assets                             | Auto-detected |
+| `--patch-dir <dir>`     | Installed update layered over `/app0` per file; its `eboot.bin` is recompiled | —             |
 | `--asan`                | Compile runtime with AddressSanitizer and LeakSanitizer                       | `false`       |
 | `--patches <xml>`       | shadPS4-format patch XML applied to the executable before analysis            | —             |
 | `--patch <name>`        | Name (`Metadata Name`) of a patch set in `--patches` to apply; repeatable     | —             |
+
+### Game Updates
+
+An extracted update (patch package) is used next to the base game, the way Orbis installs it: `/app0` shows the update's file wherever the update has one and the base game's file otherwise, and directory listings show both. The update's `eboot.bin` and `sce_sys/param.sfo` replace the base ones; modules in its `sce_module/` replace the base's.
+
+```bash
+./bin/ps4-recomp build path/to/CUSA04943 --patch-dir path/to/CUSA04943-UPDATE -o path/to/build
+```
+
+At run time `PS4_PATCH_DIR` overrides the update directory baked in at build time. `--standalone` does not support updates yet.
 
 ### Game Patches
 

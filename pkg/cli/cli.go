@@ -48,6 +48,9 @@ type Config struct {
 	ChunkSize     int
 	Verbose       bool
 	AppDir        string
+	// PatchDir is an installed update (patch package) layered over AppDir per file, as Orbis
+	// does for /app0. Empty when the game runs without an update.
+	PatchDir      string
 	CopyResources bool
 	Asan          bool
 	// TSO: acquire loads and release stores for non-stack guest memory (x86 memory ordering).
@@ -58,6 +61,36 @@ type Config struct {
 	// the executable before analysis.
 	PatchFile string
 	Patches   []string
+}
+
+// Roots is the host view of /app0: the update in PatchDir over the base in AppDir.
+func (c *Config) Roots() elfloader.AppRoots {
+	return elfloader.AppRoots{Base: c.AppDir, Patch: c.PatchDir}
+}
+
+// usePatchDir validates PatchDir and, unless -elf named the executable, recompiles the update's
+// eboot.bin: on Orbis the patch's executable replaces the base one.
+func (c *Config) usePatchDir(elfFlag bool) error {
+	abs, err := filepath.Abs(c.PatchDir)
+	if err != nil {
+		return fmt.Errorf("-patch-dir: %w", err)
+	}
+	if fi, err := os.Stat(abs); err != nil || !fi.IsDir() {
+		return fmt.Errorf("-patch-dir %q is not a directory", c.PatchDir)
+	}
+	c.PatchDir = abs
+	if c.AppDir == "" {
+		return errors.New("-patch-dir needs the base game: pass its directory or -app-dir")
+	}
+	if c.CopyResources {
+		return errors.New("-standalone with -patch-dir is not supported yet: the bundle has a single /app0 root")
+	}
+	if !elfFlag {
+		if p := filepath.Join(c.PatchDir, "eboot.bin"); fileExists(p) {
+			c.ElfPath = p
+		}
+	}
+	return nil
 }
 
 // stringList is a repeatable string flag.
@@ -93,6 +126,8 @@ Options:
       -standalone         Create self-contained macOS .app bundle with all assets and dylibs
       -copy-resources     Alias for -standalone: copy game resources into .app bundle SharedSupport/
       -app-dir <dir>      Host directory mapping to /app0 for game assets (auto-detected if omitted)
+      -patch-dir <dir>    Installed update (patch) layered over the app dir per file; its eboot.bin
+                          is recompiled unless -elf names one
   -a, -all-symbols        Recompile all symbols in symbol table even if unreachable (default: false)
   -k, -chunk-size <num>   Number of functions per emitted assembly chunk file (default: 250)
   -v, -verbose            Enable verbose output and detailed timing breakdown (default: false)
@@ -115,6 +150,7 @@ func normalizeArgs(args []string) ([]string, []string) {
 		"-O": true, "-opt": true, "--opt": true,
 		"-k": true, "-chunk-size": true, "--chunk-size": true,
 		"-app-dir": true, "--app-dir": true,
+		"-patch-dir": true, "--patch-dir": true,
 		"-patches": true, "--patches": true,
 		"-patch": true, "--patch": true,
 	}
@@ -172,6 +208,7 @@ func ParseArgs(args []string) (*Config, error) {
 	fs.IntVar(&cfg.ChunkSize, "chunk-size", cfg.ChunkSize, "Number of functions per C chunk")
 	fs.IntVar(&cfg.ChunkSize, "k", cfg.ChunkSize, "Chunk size (short)")
 	fs.StringVar(&cfg.AppDir, "app-dir", "", "Host directory mapping to /app0 for game assets")
+	fs.StringVar(&cfg.PatchDir, "patch-dir", "", "Installed update layered over the app dir per file")
 	fs.BoolVar(&cfg.CopyResources, "standalone", false, "Create self-contained macOS .app bundle with all assets and dylibs")
 	fs.BoolVar(&cfg.CopyResources, "bundle", false, "Alias for --standalone")
 	fs.BoolVar(&cfg.CopyResources, "copy-resources", false, "Copy all game assets/resources into macOS .app bundle SharedSupport/")
@@ -266,6 +303,18 @@ func ParseArgs(args []string) (*Config, error) {
 				}
 				dir = parent
 			}
+		}
+	}
+
+	if cfg.PatchDir != "" {
+		elfFlag := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "elf" || f.Name == "e" {
+				elfFlag = true
+			}
+		})
+		if err := cfg.usePatchDir(elfFlag); err != nil {
+			return nil, err
 		}
 	}
 
@@ -547,6 +596,7 @@ func Execute(args []string) (err error) {
 	l.SetTSO(cfg.TSO)
 	em := emitter.NewAsmEmitter(loaded, d, l)
 	em.AppDir = cfg.AppDir
+	em.PatchDir = cfg.PatchDir
 	em.Modules = moduleInfos
 	em.ChunkSize = cfg.ChunkSize
 	em.Workers = cfg.Jobs
@@ -579,12 +629,7 @@ func Execute(args []string) (err error) {
 	}
 
 	if cfg.AppDir != "" {
-		srcAssets := filepath.Join(cfg.AppDir, "assets")
-		dstAssets := filepath.Join(cfg.OutDir, "assets")
-		if fi, err := os.Stat(srcAssets); err == nil && fi.IsDir() {
-			_ = os.RemoveAll(dstAssets)
-			_ = copyDir(srcAssets, dstAssets)
-		}
+		_ = copyAppDir(cfg.Roots(), "assets", filepath.Join(cfg.OutDir, "assets"))
 	}
 
 	cFiles = append(cFiles, runtimeCFiles...)
@@ -656,12 +701,12 @@ func Execute(args []string) (err error) {
 func finishBuild(ctx context.Context, ev *events.Writer, cfg *Config, targetBin, appBundle string, patches []string) error {
 	if cfg.Run && cfg.Compile {
 		fmt.Fprintln(logw, "===================================================================")
-		if err := runBinary(ctx, targetBin, cfg.TimeoutSec, cfg.AppDir); err != nil {
+		if err := runBinary(ctx, targetBin, cfg.TimeoutSec, cfg.Roots()); err != nil {
 			return fmt.Errorf("execution failed: %w", cancelledOr(ctx, err))
 		}
 	}
 	if appBundle != "" {
-		ev.Done(buildResult{App: appBundle, TitleID: titleIDOf(cfg.AppDir), BuiltWith: Version, Patches: patches})
+		ev.Done(buildResult{App: appBundle, TitleID: titleIDOf(cfg.Roots()), BuiltWith: Version, Patches: patches})
 	} else {
 		ev.Done(buildResult{BuiltWith: Version, Patches: patches})
 	}
@@ -1090,7 +1135,7 @@ func compileParallel(ctx context.Context, cFiles []string, outDir string, includ
 }
 
 // runBinary runs the built game for --run; ending ctx kills it.
-func runBinary(ctx context.Context, targetBin string, timeoutSec int, appDir string) error {
+func runBinary(ctx context.Context, targetBin string, timeoutSec int, roots elfloader.AppRoots) error {
 	var cancel context.CancelFunc
 	if timeoutSec > 0 {
 		ctx, cancel = context.WithTimeout(ctx, time.Duration(timeoutSec)*time.Second)
@@ -1101,8 +1146,11 @@ func runBinary(ctx context.Context, targetBin string, timeoutSec int, appDir str
 	cmd.Stdout = logw // stderr in JSON mode: the game must not write into the event stream
 	cmd.Stderr = os.Stderr
 	cmd.Env = os.Environ()
-	if appDir != "" {
-		cmd.Env = append(cmd.Env, "PS4_APP_DIR="+appDir)
+	if roots.Base != "" {
+		cmd.Env = append(cmd.Env, "PS4_APP_DIR="+roots.Base)
+	}
+	if roots.Patch != "" {
+		cmd.Env = append(cmd.Env, "PS4_PATCH_DIR="+roots.Patch)
 	}
 
 	if timeoutSec > 0 {
@@ -1120,7 +1168,7 @@ func runBinary(ctx context.Context, targetBin string, timeoutSec int, appDir str
 }
 
 func loadCompanionModules(cfg *Config, main *elfloader.LoadedELF) ([]emitter.GuestModule, error) {
-	refs := elfloader.DiscoverCompanionModules(cfg.ElfPath, cfg.AppDir, main.MemoryImage)
+	refs := elfloader.DiscoverCompanionModules(cfg.ElfPath, cfg.Roots(), main.MemoryImage)
 	referenced := elfloader.ReferencedModuleNames(main.MemoryImage)
 	found := make(map[string]struct{})
 	for _, ref := range refs {
@@ -1289,6 +1337,32 @@ func isRuntimeSource(name string) bool {
 	return false
 }
 
+// copyAppDir replaces dst with the /app0 directory rel as the guest sees it: the base's files
+// with the update's copied over them. It does nothing when neither root has rel.
+func copyAppDir(roots elfloader.AppRoots, rel, dst string) error {
+	var srcs []string
+	for _, root := range []string{roots.Base, roots.Patch} {
+		if root == "" {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(root, rel)); err == nil && fi.IsDir() {
+			srcs = append(srcs, filepath.Join(root, rel))
+		}
+	}
+	if len(srcs) == 0 {
+		return nil
+	}
+	if err := os.RemoveAll(dst); err != nil {
+		return err
+	}
+	for _, src := range srcs {
+		if err := copyDir(src, dst); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func copyDir(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -1429,21 +1503,9 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 			}
 		} else {
 			// Default selective copy of assets/ and sce_sys/ if present
-			srcAssets := filepath.Join(cfg.AppDir, "assets")
-			dstAssets := filepath.Join(sharedSupportDir, "assets")
-			if fi, err := os.Stat(srcAssets); err == nil && fi.IsDir() {
-				_ = os.RemoveAll(dstAssets)
-				if err := copyDir(srcAssets, dstAssets); err != nil {
-					return "", fmt.Errorf("failed to copy assets into app bundle: %w", err)
-				}
-			}
-
-			srcSceSys := filepath.Join(cfg.AppDir, "sce_sys")
-			dstSceSys := filepath.Join(sharedSupportDir, "sce_sys")
-			if fi, err := os.Stat(srcSceSys); err == nil && fi.IsDir() {
-				_ = os.RemoveAll(dstSceSys)
-				if err := copyDir(srcSceSys, dstSceSys); err != nil {
-					return "", fmt.Errorf("failed to copy sce_sys into app bundle: %w", err)
+			for _, name := range []string{"assets", "sce_sys"} {
+				if err := copyAppDir(cfg.Roots(), name, filepath.Join(sharedSupportDir, name)); err != nil {
+					return "", fmt.Errorf("failed to copy %s into app bundle: %w", name, err)
 				}
 			}
 		}
@@ -1452,7 +1514,7 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 	// 5. Generate AppIcon.icns from icon0.png if present in Resources/ (so Finder displays icon)
 	hasIcon := false
 	if cfg.AppDir != "" {
-		iconPath := filepath.Join(cfg.AppDir, "sce_sys", "icon0.png")
+		iconPath := cfg.Roots().Path(filepath.Join("sce_sys", "icon0.png"))
 		if _, err := os.Stat(iconPath); err == nil {
 			icnsDst := filepath.Join(resourcesDir, "AppIcon.icns")
 			cmd := exec.Command("sips", "-s", "format", "icns", iconPath, "--out", icnsDst)
@@ -1463,7 +1525,7 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 	}
 
 	// 6. Generate Contents/Info.plist
-	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(appInfoPlist(appName, hasIcon, bundleMetaFor(cfg.AppDir, appName))), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(contentsDir, "Info.plist"), []byte(appInfoPlist(appName, hasIcon, bundleMetaFor(cfg.Roots(), appName))), 0o644); err != nil {
 		return "", fmt.Errorf("failed to write Info.plist: %w", err)
 	}
 
@@ -1491,7 +1553,7 @@ func loadPatchedELF(cfg *Config) (*elfloader.LoadedELF, *elfpatch.Result, error)
 		if err != nil {
 			return nil, nil, err
 		}
-		sf := readSFO(cfg.AppDir)
+		sf := readSFO(cfg.Roots())
 		if sf == nil {
 			return nil, nil, fmt.Errorf("patches are checked against sce_sys/param.sfo, which was not found in the app dir %q", cfg.AppDir)
 		}
@@ -1524,12 +1586,13 @@ func loadPatchedELF(cfg *Config) (*elfloader.LoadedELF, *elfpatch.Result, error)
 	return loaded, res, nil
 }
 
-// readSFO loads <appDir>/sce_sys/param.sfo, or returns nil when there is none.
-func readSFO(appDir string) *sfo.File {
-	if appDir == "" {
+// readSFO loads /app0/sce_sys/param.sfo (the update's when it has one), or returns nil when
+// there is none.
+func readSFO(roots elfloader.AppRoots) *sfo.File {
+	if roots.Base == "" {
 		return nil
 	}
-	f, err := sfo.Load(filepath.Join(appDir, "sce_sys", "param.sfo"))
+	f, err := sfo.Load(roots.Path(filepath.Join("sce_sys", "param.sfo")))
 	if err != nil {
 		return nil
 	}
@@ -1537,8 +1600,8 @@ func readSFO(appDir string) *sfo.File {
 }
 
 // titleIDOf returns TITLE_ID from the app dir's param.sfo, or "".
-func titleIDOf(appDir string) string {
-	if f := readSFO(appDir); f != nil {
+func titleIDOf(roots elfloader.AppRoots) string {
+	if f := readSFO(roots); f != nil {
 		id, _ := f.String("TITLE_ID")
 		return id
 	}
@@ -1548,9 +1611,9 @@ func titleIDOf(appDir string) string {
 // bundleMetaFor derives the bundle identity from <appDir>/sce_sys/param.sfo: bundle id
 // org.ps4recomp.<TITLE_ID>, TITLE as the display name and APP_VER as the version (real dumps
 // often carry only VERSION, which is the fallback). Missing values keep the generic defaults.
-func bundleMetaFor(appDir, appName string) bundleMeta {
+func bundleMetaFor(roots elfloader.AppRoots, appName string) bundleMeta {
 	m := bundleMeta{BundleID: "org.ps4recomp." + appName, DisplayName: appName, Version: "1.0"}
-	f := readSFO(appDir)
+	f := readSFO(roots)
 	if f == nil {
 		return m
 	}

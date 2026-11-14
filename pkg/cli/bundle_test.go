@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"ps4-recomp/pkg/elfloader"
 	"ps4-recomp/pkg/sfo"
 )
 
@@ -77,7 +78,7 @@ func TestInfoPlistFromSFO(t *testing.T) {
 }
 
 func TestBundleMetaFallback(t *testing.T) {
-	m := bundleMetaFor(t.TempDir(), "eboot")
+	m := bundleMetaFor(elfloader.AppRoots{Base: t.TempDir()}, "eboot")
 	if m.BundleID != "org.ps4recomp.eboot" || m.DisplayName != "eboot" || m.Version != "1.0" {
 		t.Errorf("fallback = %+v", m)
 	}
@@ -101,11 +102,11 @@ func TestBundleMetaFromSFO(t *testing.T) {
 		sfo.Entry{Key: "TITLE", Str: "Uncharted 4: A Thief’s End"},
 		sfo.Entry{Key: "APP_VER", Str: "01.32"},
 		sfo.Entry{Key: "VERSION", Str: "01.00"})
-	m := bundleMetaFor(dir, "eboot")
+	m := bundleMetaFor(elfloader.AppRoots{Base: dir}, "eboot")
 	if m.BundleID != "org.ps4recomp.CUSA04529" || m.DisplayName != "Uncharted 4: A Thief’s End" || m.Version != "01.32" {
 		t.Errorf("meta = %+v", m)
 	}
-	if id := titleIDOf(dir); id != "CUSA04529" {
+	if id := titleIDOf(elfloader.AppRoots{Base: dir}); id != "CUSA04529" {
 		t.Errorf("titleIDOf = %q", id)
 	}
 }
@@ -116,7 +117,7 @@ func TestBundleMetaVersionFallbackAndSanitizedID(t *testing.T) {
 		sfo.Entry{Key: "TITLE_ID", Str: "CUSA 00/557!"},
 		sfo.Entry{Key: "TITLE", Str: "Game"},
 		sfo.Entry{Key: "VERSION", Str: "01.05"})
-	m := bundleMetaFor(dir, "eboot")
+	m := bundleMetaFor(elfloader.AppRoots{Base: dir}, "eboot")
 	if m.BundleID != "org.ps4recomp.CUSA00557" || m.Version != "01.05" {
 		t.Errorf("meta = %+v", m)
 	}

@@ -1,39 +1,32 @@
-# PS4Recomp
+# GRMacRecomp
 
-A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates PlayStation 4 (x86-64 ELF) binaries into native ARM64 executables and standalone `.app` bundles. No JIT, virtual machines, or MoltenVK required.
+A native macOS (Apple Silicon) build of **Gravity Rush Remastered** (PS4, `CUSA01113`), produced by ahead-of-time (AOT) static recompilation of the PS4 x86-64 executable into ARM64. No JIT, virtual machines, or MoltenVK.
 
-|                                        |                                        |
-| :------------------------------------: | :------------------------------------: |
-|  ![Blood 1](images/blood_test_01.jpg)  |  ![Blood 2](images/blood_test_02.jpg)  |
-| ![Yakuza 1](images/yakuza_test_01.jpg) | ![Yakuza 2](images/yakuza_test_02.jpg) |
-| ![Drake’s Fortune — seaplane cabin](images/uncharted_test_01.jpg) | ![Drake’s Fortune — island shore and boat](images/uncharted_test_02.jpg) |
+> GRMacRecomp is a fork of **[PS4Recomp](https://github.com/wie-project/PS4Recomp)** focused on a single title. Fixes to the generic recompiler and runtime are kept upstreamable and sent back to PS4Recomp.
 
 ---
 
-## Highlights
+## Status
 
-- **Native ARM64 Assembly AOT**: Direct AMD64 to ARM64 assembly translation with parallel Clang assembly and x86 Total Store Order (`-tso`) acquire/release memory semantics.
-- **Metal 3 / 4 Graphics Backend**: GCN bytecode to MSL translation via `gcn-recompiler` and SPIRV-Cross, direct Metal render/compute pipelines, frame pacing, and zero-copy UMA physical direct memory aliasing.
-- **Orbis Kernel & Subsystems**: Multi-module TLS, fiber-aware pthread synchronization primitives, event queues (`libkernel` equeues), asynchronous I/O, and virtual filesystem virtualization (`/app0`).
-- **Media & Hardware Integration**: 48 kHz multi-channel host audio mixer (`libSceAudioOut`), ATRAC9 audio decoding (`libSceAjm`), VideoToolbox hardware H.264 cutscene decoding (`libSceVideodec`), and native GameController support (`libScePad`).
-- **macOS Bundle Packaging**: Automatic generation of self-contained macOS `.app` bundles with resource staging and ad-hoc code-signing.
+Work in progress. Gravity Rush Remastered is the only target of this fork; other titles supported by PS4Recomp are tracked upstream.
+
+Areas currently being worked on for Gravity Rush:
+
+- CFG recovery of inline jump tables in the executable
+- NGS2 audio (`libSceNgs2`) and AvPlayer video through the game's `file_replacement` callbacks
+- GNM depth feedback and GPU performance on Metal
+- Frame pacing, touch pad and motion sensors (gravity shift relies on the DualSense / DualShock 4 gyroscope)
+
+> GRMacRecomp operates **exclusively on a decrypted and extracted game folder** (`eboot.bin` and assets) dumped from your own copy of the game. For extracting PKG files on macOS use **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)**.
 
 ---
 
-## Compatibility Status
+## Related Repositories
 
-> PS4Recomp operates **exclusively on decrypted and extracted game folders** (`eboot.bin` and assets). For dumping/extracting PKG files on macOS using **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)**
-
-| Title                                    | Title ID    | Engine / Type       | Status                 | Notes                                                                       |
-| ---------------------------------------- | ----------- | ------------------- | ---------------------- | --------------------------------------------------------------------------- |
-| **Yakuza 0**                             | `CUSA05070` | Kiwami Engine       | **Playble**            | Starts, settings works, cutscenes and gameplay works in first mission       |
-| **Gravity Rush Remastered**              | `CUSA01113` | SIE Japan Studio    | **Playable**           | Boots, menus, cutscenes, gravity shift via DualSense gyro                   |
-| **Uncharted: The Nathan Drake Collection** | `CUSA02343` | Naughty Dog Engine | **Playable** | Tested in *Drake’s Fortune* only: intro, cutscenes, gunplay, HUD and 2D overlays at 1080p; the other collection entries are untested. |
-| **Catherine: Full Body**                 | `CUSA14836` | Atlus Engine        | **In-Game**            | Starts. Has a graphic artifacts                                             |
-| **Bloodborne: Game of the Year Edition** | `CUSA03173` | FromSoftware Engine | **In-Game**            | Starts, settings, cutscenes and character editor works. The gameplay starts |
-| **The Last of Us Remastered**            | `CUSA00557` | Naughty Dog Engine  | **Bootable / In-Game** | Boots, renders 3D graphics and audio                                        |
-| **Hollow Knight: Silksong**              | —           | Unity 6             | **Suspended**          | Paused pending guest C++ exception unwinding in ARM64 backend               |
-| **Hogwarts Legacy**                      | `CUSA12824` | Unreal Engine 4     | **In Progress**        | Recompiles; halts during early engine startup                               |
+- **[wie-project/PS4Recomp](https://github.com/wie-project/PS4Recomp)** — the upstream PS4 to macOS static recompiler this fork is based on.
+- **[shadPS4](https://github.com/shadps4-emu/shadPS4)** — PS4 emulator; reference for HLE module behavior and the patch XML format.
+- **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)** — PKG extraction on macOS.
+- **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**, **[ext-LibAtrac9](https://github.com/shadps4-emu/ext-LibAtrac9)**, **[minimp3](https://github.com/lieff/minimp3)** — bundled as submodules.
 
 ---
 
@@ -42,7 +35,7 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 ### Prerequisites
 
 - **macOS**: Apple Silicon (M1 / M2 / M3 / M4)
-- **Go**: 1.27.1+
+- **Go**: 1.22+
 - **Xcode Command Line Tools**: `xcode-select --install`
 - **Build Tools & Libraries**:
   ```bash
@@ -53,8 +46,8 @@ A macOS Apple Silicon ahead-of-time (AOT) static recompiler that translates Play
 
 ```bash
 # 1. Clone repository with submodules
-git clone --recursive https://github.com/wie-project/PS4Recomp.git
-cd PS4Recomp
+git clone --recursive https://github.com/btolfa/GRMacRecomp.git
+cd GRMacRecomp
 
 # 2. Build standalone ps4-recomp binary
 ./scripts/build.sh
@@ -71,24 +64,24 @@ cd PS4Recomp
 Inspect CFG, control flow, instruction compatibility, and referenced PRX modules:
 
 ```bash
-./bin/ps4-recomp analyze path/to/game
+./bin/ps4-recomp analyze path/to/CUSA01113
 # or directly on eboot.bin:
-./bin/ps4-recomp analyze path/to/game/eboot.bin
+./bin/ps4-recomp analyze path/to/CUSA01113/eboot.bin
 ```
 
 ### Recompile & Build Game
 
-PS4Recomp automatically finds `eboot.bin` and game assets in the provided game directory:
+The recompiler automatically finds `eboot.bin` and game assets in the provided game directory:
 
 ```bash
 # Basic compilation to native ARM64 macOS .app bundle:
-./bin/ps4-recomp build path/to/game -o path/to/build
+./bin/ps4-recomp build path/to/CUSA01113 -o path/to/build
 
 # Fully standalone macOS .app bundle (bundles all game assets and dylibs for distribution):
-./bin/ps4-recomp build path/to/game -o path/to/build --standalone
+./bin/ps4-recomp build path/to/CUSA01113 -o path/to/build --standalone
 
 # Compile and immediately run the game:
-./bin/ps4-recomp build path/to/game -o path/to/build -run
+./bin/ps4-recomp build path/to/CUSA01113 -o path/to/build -run
 ```
 
 Once built, launch the game by double-clicking `<GameName>.app` in Finder, or run from terminal:
@@ -133,7 +126,7 @@ Once built, launch the game by double-clicking `<GameName>.app` in Finder, or ru
 
 ## Controls & Input Mapping
 
-PS4Recomp provides native game controller support via Apple's GameController framework (DualShock 4, DualSense, Xbox Wireless, and Nintendo Switch controllers are detected automatically over Bluetooth or USB). A DualShock 4 or DualSense touch pad reports its click and up to two finger positions, like the PS4 pad (1920x943, each new finger gets a new id).
+The runtime provides native game controller support via Apple's GameController framework (DualShock 4, DualSense, Xbox Wireless, and Nintendo Switch controllers are detected automatically over Bluetooth or USB). A DualShock 4 or DualSense touch pad reports its click and up to two finger positions, like the PS4 pad (1920x943, each new finger gets a new id).
 
 When playing without a physical controller, built-in keyboard emulation is active whenever the game window is focused:
 
@@ -198,18 +191,16 @@ When playing without a physical controller, built-in keyboard emulation is activ
 
 ## Credits & Acknowledgements
 
-Special thanks to the open-source PlayStation emulation and research communities:
-
+- **[PS4Recomp](https://github.com/wie-project/PS4Recomp)** and its contributors — the recompiler, runtime and HLE modules this project is built on.
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4)** — HLE module architecture and system behavior documentation.
 - **[OpenOrbis](https://github.com/OpenOrbis)** — Open-source PS4 toolchain and reverse engineering.
 - **[ps4libdoc](https://github.com/idc/ps4libdoc)** — Symbol dictionaries and NID-to-name mappings.
-- Forks of the project, which help to develop it further
 
 ---
 
 ## Legal Notice
 
-PS4Recomp is an independent educational and research project into ahead-of-time binary translation. It does not distribute, bundle, or contain any copyrighted PlayStation 4 system libraries, firmware files, or proprietary encryption keys. "PlayStation", "PlayStation 4", "PS4", and "Orbis OS" are registered trademarks of Sony Interactive Entertainment Inc. All commercial game titles and assets belong to their respective owners.
+GRMacRecomp is an independent educational and research project into ahead-of-time binary translation. It does not distribute, bundle, or contain any game code or assets, copyrighted PlayStation 4 system libraries, firmware files, or proprietary encryption keys; you need your own legally obtained copy of the game. "Gravity Rush" is a trademark of Sony Interactive Entertainment Inc. "PlayStation", "PlayStation 4", "PS4", and "Orbis OS" are registered trademarks of Sony Interactive Entertainment Inc. All game titles and assets belong to their respective owners.
 
 ---
 

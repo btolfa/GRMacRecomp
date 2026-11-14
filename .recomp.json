@@ -1,0 +1,16 @@
+{
+  "$schema": "https://recomp.fyi/schema/v1.json",
+  "game": "Gravity Rush Remastered",
+  "wikidata": "Q107424188",
+  "system": "PS4",
+  "type": "recomp",
+  "original": { "region": "EU", "serial": "CUSA01113" },
+  "project": "GRMacRecomp",
+  "status": "in-progress",
+  "targets": ["macOS"],
+  "toolchain": "PS4Recomp",
+  "approach": "Ahead-of-time recompilation of the x86-64 eboot.bin to ARM64, GCN shaders translated to Metal; no JIT.",
+  "maintainers": [{ "name": "btolfa", "link": "https://github.com/btolfa" }],
+  "links": [{ "label": "Upstream PS4Recomp", "url": "https://github.com/wie-project/PS4Recomp" }],
+  "tags": ["apple-silicon", "metal"]
+}

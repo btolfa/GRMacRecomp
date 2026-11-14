@@ -1,798 +1,469 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// libSceJson2 (sce::Json) host shims over ps4_json2_core.c.
+//
+// Like the firmware library, every byte of JSON storage comes from the sce::Json::MemAllocator
+// the game hands to Initializer::initialize, so the values the game references live in guest
+// memory. The allocator is a C++ object; its virtual functions are called in the guest:
+//   vtable +0x00 complete destructor, +0x08 deleting destructor,
+//   +0x10 void *allocate(size_t size, void *user_data),
+//   +0x18 void deallocate(void *ptr, void *user_data),
+//   +0x20 void notifyError(int32_t error, size_t size, void *user_data)
+// (Gravity Rush 2's allocator vtable at 0x16f1a48 of its v1.11 eboot has this layout).
+// InitParameter is {MemAllocator *allocator; void *user_data; size_t file_buffer_size} (the same
+// game fills one at 0x44b2d9); InitParameter2 keeps its first three fields in the same order.
 #include "ps4_json2.h"
+#include "ps4_json2_core.h"
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <inttypes.h>
 
-static inline void *guest_to_host(GuestContext *ctx, uint64_t addr) {
-    if (!addr || !ctx || !ctx->mem_base) return NULL;
-    if (addr >= (uintptr_t)ctx->mem_base && addr < (uintptr_t)ctx->mem_base + ctx->mem_size) {
-        return (void *)addr;
-    }
-    if (addr < ctx->mem_size) {
-        return (void *)(ctx->mem_base + addr);
-    }
-    return (void *)addr;
+static struct {
+  int ready;
+  uint64_t allocator, user_data;
+  // Referenced by const getters on a value of another type; allocated when first needed.
+  uint64_t null_value, empty_string, empty_array, empty_object;
+} g_json;
+
+typedef struct GuestHeap {
+  Json2Heap h;
+  GuestContext *ctx;
+} GuestHeap;
+
+static uint64_t *gp64(GuestContext *ctx, uint64_t a) { return (uint64_t *)(ctx->mem_base + a); }
+
+static void json_fatal(const char *what) {
+  fprintf(stderr, "[json2] FATAL: %s\n", what);
+  fflush(stderr);
+  abort();
 }
 
-static uint64_t alloc_guest_string(GuestContext *ctx, const char *str, size_t *out_len) {
-    if (!str) {
-        if (out_len) *out_len = 0;
-        return 0;
-    }
-    size_t len = strlen(str);
-    if (out_len) *out_len = len;
-    size_t alloc_sz = (len + 16) & ~15ULL;
-    uint64_t g_addr = recomp_vm_alloc(ctx, alloc_sz);
-    if (g_addr) {
-        char *h_ptr = (char *)(ctx->mem_base + g_addr);
-        memcpy(h_ptr, str, len + 1);
-    }
-    return g_addr;
+// Calls the allocator's virtual function at vtable offset slot with (arg, user_data).
+static uint64_t call_allocator(GuestContext *ctx, uint64_t slot, uint64_t arg) {
+  uint64_t vtable = *gp64(ctx, g_json.allocator);
+  GuestContext sub = *ctx;
+  sub.rdi = g_json.allocator;
+  sub.rsi = arg;
+  sub.rdx = g_json.user_data;
+  recomp_call_guest(&sub, *gp64(ctx, vtable + slot));
+  return sub.rax;
 }
 
-static SceJsonValue g_json_null_value = { .type = SCE_JSON_TYPE_NULL };
-
-static void free_json_value(GuestContext *ctx, SceJsonValue *v) {
-    (void)ctx;
-    if (!v) return;
-    if (v->type == SCE_JSON_TYPE_OBJECT) {
-        SceJsonObjectEntry *cur = v->as.obj.head;
-        while (cur) {
-            SceJsonObjectEntry *next = cur->next;
-            if (cur->key) free(cur->key);
-            if (cur->val) {
-                free_json_value(ctx, cur->val);
-                free(cur->val);
-            }
-            free(cur);
-            cur = next;
-        }
-        v->as.obj.head = NULL;
-        v->as.obj.count = 0;
-    } else if (v->type == SCE_JSON_TYPE_ARRAY) {
-        if (v->as.arr.items) {
-            for (size_t i = 0; i < v->as.arr.count; i++) {
-                if (v->as.arr.items[i]) {
-                    free_json_value(ctx, v->as.arr.items[i]);
-                    free(v->as.arr.items[i]);
-                }
-            }
-            free(v->as.arr.items);
-            v->as.arr.items = NULL;
-        }
-        v->as.arr.count = 0;
-        v->as.arr.cap = 0;
-    }
-    v->type = SCE_JSON_TYPE_NULL;
+static uint64_t guest_alloc(Json2Heap *h, uint64_t size) {
+  GuestHeap *gh = (GuestHeap *)h;
+  if (!g_json.ready)
+    json_fatal("sce::Json used before Initializer::initialize");
+  uint64_t a = call_allocator(gh->ctx, 0x10, size);
+  if (!a) {
+    // The firmware reports this through notifyError with an error code this runtime does not
+    // know yet; stop with a report instead of continuing without the memory.
+    fprintf(stderr, "[json2] FATAL: MemAllocator::allocate(%llu) returned NULL\n", (unsigned long long)size);
+    abort();
+  }
+  return a;
 }
 
-static void deep_copy_value(GuestContext *ctx, SceJsonValue *dst, const SceJsonValue *src) {
-    if (!dst || !src) return;
-    free_json_value(ctx, dst);
-    dst->type = src->type;
-    switch (src->type) {
-        case SCE_JSON_TYPE_BOOL:
-            dst->as.b = src->as.b;
-            break;
-        case SCE_JSON_TYPE_INT:
-            dst->as.i = src->as.i;
-            break;
-        case SCE_JSON_TYPE_REAL:
-            dst->as.r = src->as.r;
-            break;
-        case SCE_JSON_TYPE_STRING:
-            dst->as.s = src->as.s;
-            break;
-        case SCE_JSON_TYPE_OBJECT: {
-            dst->as.obj.head = NULL;
-            dst->as.obj.count = 0;
-            SceJsonObjectEntry *cur = src->as.obj.head;
-            while (cur) {
-                SceJsonObjectEntry *e = (SceJsonObjectEntry *)malloc(sizeof(SceJsonObjectEntry));
-                e->key = cur->key ? strdup(cur->key) : NULL;
-                e->val = (SceJsonValue *)calloc(1, sizeof(SceJsonValue));
-                if (cur->val) {
-                    deep_copy_value(ctx, e->val, cur->val);
-                }
-                e->next = dst->as.obj.head;
-                dst->as.obj.head = e;
-                dst->as.obj.count++;
-                cur = cur->next;
-            }
-            break;
-        }
-        case SCE_JSON_TYPE_ARRAY: {
-            dst->as.arr.count = src->as.arr.count;
-            dst->as.arr.cap = src->as.arr.count;
-            if (src->as.arr.count > 0) {
-                dst->as.arr.items = (SceJsonValue **)malloc(src->as.arr.count * sizeof(SceJsonValue *));
-                for (size_t i = 0; i < src->as.arr.count; i++) {
-                    dst->as.arr.items[i] = (SceJsonValue *)calloc(1, sizeof(SceJsonValue));
-                    if (src->as.arr.items[i]) {
-                        deep_copy_value(ctx, dst->as.arr.items[i], src->as.arr.items[i]);
-                    }
-                }
-            } else {
-                dst->as.arr.items = NULL;
-            }
-            break;
-        }
-        default:
-            break;
-    }
+static void guest_release(Json2Heap *h, uint64_t a) {
+  GuestHeap *gh = (GuestHeap *)h;
+  call_allocator(gh->ctx, 0x18, a);
 }
 
-// Serialization
-typedef struct DynamicBuffer {
-    char *buf;
-    size_t len;
-    size_t cap;
-} DynamicBuffer;
-
-static void buf_append_str(DynamicBuffer *db, const char *s) {
-    if (!s) return;
-    size_t slen = strlen(s);
-    if (db->len + slen + 1 > db->cap) {
-        size_t new_cap = (db->cap ? db->cap * 2 : 128) + slen;
-        char *nb = (char *)realloc(db->buf, new_cap);
-        if (!nb) return;
-        db->buf = nb;
-        db->cap = new_cap;
-    }
-    memcpy(db->buf + db->len, s, slen);
-    db->len += slen;
-    db->buf[db->len] = '\0';
+static GuestHeap heap(GuestContext *ctx) {
+  GuestHeap gh = {{ctx->mem_base, guest_alloc, guest_release}, ctx};
+  return gh;
 }
 
-static void buf_append_escaped_str(DynamicBuffer *db, const char *s) {
-    buf_append_str(db, "\"");
-    if (s) {
-        for (size_t i = 0; s[i]; i++) {
-            char c = s[i];
-            if (c == '"') buf_append_str(db, "\\\"");
-            else if (c == '\\') buf_append_str(db, "\\\\");
-            else if (c == '\n') buf_append_str(db, "\\n");
-            else if (c == '\r') buf_append_str(db, "\\r");
-            else if (c == '\t') buf_append_str(db, "\\t");
-            else {
-                char ch[2] = {c, '\0'};
-                buf_append_str(db, ch);
-            }
-        }
-    }
-    buf_append_str(db, "\"");
+static uint64_t static_null(GuestHeap *gh) {
+  if (!g_json.null_value) {
+    g_json.null_value = gh->h.alloc(&gh->h, JSON2_VALUE_SIZE);
+    json2_value_init(&gh->h, g_json.null_value, JSON2_NULL);
+  }
+  return g_json.null_value;
 }
 
-static void serialize_json_rec(GuestContext *ctx, const SceJsonValue *v, DynamicBuffer *db) {
-    if (!v || v->type == SCE_JSON_TYPE_NULL) {
-        buf_append_str(db, "null");
-        return;
-    }
-    switch (v->type) {
-        case SCE_JSON_TYPE_BOOL:
-            buf_append_str(db, v->as.b ? "true" : "false");
-            break;
-        case SCE_JSON_TYPE_INT: {
-            char num[32];
-            snprintf(num, sizeof(num), "%" PRId64, v->as.i);
-            buf_append_str(db, num);
-            break;
-        }
-        case SCE_JSON_TYPE_REAL: {
-            char num[64];
-            snprintf(num, sizeof(num), "%g", v->as.r);
-            buf_append_str(db, num);
-            break;
-        }
-        case SCE_JSON_TYPE_STRING: {
-            const char *cstr = "";
-            if (v->as.s.data) {
-                const char *hc = (const char *)guest_to_host(ctx, (uint64_t)v->as.s.data);
-                if (hc) cstr = hc;
-            }
-            buf_append_escaped_str(db, cstr);
-            break;
-        }
-        case SCE_JSON_TYPE_ARRAY: {
-            buf_append_str(db, "[");
-            for (size_t i = 0; i < v->as.arr.count; i++) {
-                if (i > 0) buf_append_str(db, ",");
-                serialize_json_rec(ctx, v->as.arr.items[i], db);
-            }
-            buf_append_str(db, "]");
-            break;
-        }
-        case SCE_JSON_TYPE_OBJECT: {
-            buf_append_str(db, "{");
-            size_t idx = 0;
-            SceJsonObjectEntry *cur = v->as.obj.head;
-            while (cur) {
-                if (idx > 0) buf_append_str(db, ",");
-                buf_append_escaped_str(db, cur->key ? cur->key : "");
-                buf_append_str(db, ":");
-                serialize_json_rec(ctx, cur->val, db);
-                idx++;
-                cur = cur->next;
-            }
-            buf_append_str(db, "}");
-            break;
-        }
-        default:
-            buf_append_str(db, "null");
-            break;
-    }
+static uint64_t static_empty(GuestHeap *gh, uint64_t *slot, uint32_t type) {
+  if (!*slot) {
+    *slot = gh->h.alloc(&gh->h, 8);
+    if (type == JSON2_STRING)
+      json2_string_init(&gh->h, *slot, "", 0);
+    else if (type == JSON2_ARRAY)
+      json2_array_init(&gh->h, *slot);
+    else
+      json2_object_init(&gh->h, *slot);
+  }
+  return *slot;
 }
 
-// Initializer & Allocator shims
-void shim__ZN3sce4Json12MemAllocatorC2Ev(GuestContext *ctx) {
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+static const char *host_chars(GuestContext *ctx, uint64_t a) {
+  return a ? (const char *)(ctx->mem_base + a) : "";
 }
 
-void shim__ZN3sce4Json12MemAllocatorD2Ev(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
+#define HEAP GuestHeap gh = heap(ctx); Json2Heap *h = &gh.h
+#define RET(v)                                                                                     \
+  do {                                                                                             \
+    ctx->rax = (uint64_t)(v);                                                                      \
+    SHIM_RETURN();                                                                                 \
+  } while (0)
+
+// ---- MemAllocator, InitParameter, Initializer
+
+// The game's allocator class writes its own vtable after the base constructor returns.
+void shim__ZN3sce4Json12MemAllocatorC2Ev(GuestContext *ctx) { RET(ctx->rdi); }
+void shim__ZN3sce4Json12MemAllocatorD2Ev(GuestContext *ctx) { RET(0); }
+
+// The base class's notifyError, which a game's allocator inherits unless it overrides it.
+void shim__ZN3sce4Json12MemAllocator11notifyErrorEimPv(GuestContext *ctx) {
+  fprintf(stderr, "[json2] MemAllocator::notifyError(error=0x%x, size=%llu)\n", (uint32_t)ctx->rsi,
+          (unsigned long long)ctx->rdx);
+  RET(0);
 }
 
 void shim__ZN3sce4Json14InitParameter2C1Ev(GuestContext *ctx) {
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  memset(ctx->mem_base + ctx->rdi, 0, 24);
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
+  *gp64(ctx, ctx->rdi) = ctx->rsi;
+  *gp64(ctx, ctx->rdi + 8) = ctx->rdx;
+  RET(0);
 }
 
 void shim__ZN3sce4Json14InitParameter217setFileBufferSizeEm(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
+  *gp64(ctx, ctx->rdi + 16) = ctx->rsi;
+  RET(0);
 }
 
-void shim__ZN3sce4Json11InitializerC1Ev(GuestContext *ctx) {
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+// The library state is global; the Initializer object holds nothing.
+void shim__ZN3sce4Json11InitializerC1Ev(GuestContext *ctx) { RET(ctx->rdi); }
+void shim__ZN3sce4Json11InitializerD1Ev(GuestContext *ctx) { RET(0); }
+
+static void initialize(GuestContext *ctx, uint64_t param) {
+  if (g_json.ready)
+    json_fatal("Initializer::initialize called again without terminate (its error code is not known)");
+  if (!param || !*gp64(ctx, param))
+    json_fatal("Initializer::initialize without an allocator (its error code is not known)");
+  g_json.allocator = *gp64(ctx, param);
+  g_json.user_data = *gp64(ctx, param + 8);
+  g_json.ready = 1;
 }
 
-void shim__ZN3sce4Json11InitializerD1Ev(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
+void shim__ZN3sce4Json11Initializer10initializeEPKNS0_13InitParameterE(GuestContext *ctx) {
+  initialize(ctx, ctx->rsi);
+  RET(0);
 }
 
 void shim__ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
+  initialize(ctx, ctx->rsi);
+  RET(0);
 }
 
 void shim__ZN3sce4Json11Initializer9terminateEv(GuestContext *ctx) {
-    ctx->rax = 0;
-    SHIM_RETURN();
+  if (!g_json.ready)
+    json_fatal("Initializer::terminate without initialize (its error code is not known)");
+  HEAP;
+  if (g_json.null_value) {
+    json2_value_destroy(h, g_json.null_value);
+    h->release(h, g_json.null_value);
+  }
+  if (g_json.empty_string) {
+    json2_string_destroy(h, g_json.empty_string);
+    h->release(h, g_json.empty_string);
+  }
+  if (g_json.empty_array) {
+    json2_array_destroy(h, g_json.empty_array);
+    h->release(h, g_json.empty_array);
+  }
+  if (g_json.empty_object) {
+    json2_object_destroy(h, g_json.empty_object);
+    h->release(h, g_json.empty_object);
+  }
+  memset(&g_json, 0, sizeof(g_json));
+  RET(0);
 }
 
-// String shims
+// ---- String
+
 void shim__ZN3sce4Json6StringC1Ev(GuestContext *ctx) {
-    SceJsonString *s = (SceJsonString *)guest_to_host(ctx, ctx->rdi);
-    if (s) {
-        s->data = NULL;
-        s->len = 0;
-        s->cap = 0;
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_string_init(h, ctx->rdi, "", 0);
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json6StringC1EPKc(GuestContext *ctx) {
-    SceJsonString *s = (SceJsonString *)guest_to_host(ctx, ctx->rdi);
-    const char *cstr = (const char *)guest_to_host(ctx, ctx->rsi);
-    if (s) {
-        if (cstr) {
-            size_t len = 0;
-            uint64_t g_str = alloc_guest_string(ctx, cstr, &len);
-            s->data = (char *)g_str;
-            s->len = len;
-            s->cap = len;
-        } else {
-            s->data = NULL;
-            s->len = 0;
-            s->cap = 0;
-        }
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  const char *s = host_chars(ctx, ctx->rsi);
+  json2_string_init(h, ctx->rdi, s, strlen(s));
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json6StringD1Ev(GuestContext *ctx) {
-    SceJsonString *s = (SceJsonString *)guest_to_host(ctx, ctx->rdi);
-    if (s) {
-        s->data = NULL;
-        s->len = 0;
-        s->cap = 0;
-    }
-    ctx->rax = 0;
-    SHIM_RETURN();
+  HEAP;
+  json2_string_destroy(h, ctx->rdi);
+  RET(0);
 }
 
 void shim__ZNK3sce4Json6String5c_strEv(GuestContext *ctx) {
-    SceJsonString *s = (SceJsonString *)guest_to_host(ctx, ctx->rdi);
-    if (s && s->data) {
-        ctx->rax = (uint64_t)s->data;
-    } else {
-        static uint64_t g_empty_str = 0;
-        if (!g_empty_str) {
-            g_empty_str = alloc_guest_string(ctx, "", NULL);
-        }
-        ctx->rax = g_empty_str;
-    }
-    SHIM_RETURN();
+  HEAP;
+  RET(json2_string_cstr(h, ctx->rdi));
 }
 
 void shim__ZNK3sce4Json6String6lengthEv(GuestContext *ctx) {
-    const SceJsonString *s = (const SceJsonString *)guest_to_host(ctx, ctx->rdi);
-    ctx->rax = s ? (uint64_t)s->len : 0;
-    SHIM_RETURN();
+  HEAP;
+  RET(json2_string_length(h, ctx->rdi));
 }
 
 void shim__ZN3sce4Json6StringaSERKS1_(GuestContext *ctx) {
-    SceJsonString *dst = (SceJsonString *)guest_to_host(ctx, ctx->rdi);
-    const SceJsonString *src = (const SceJsonString *)guest_to_host(ctx, ctx->rsi);
-    if (dst && src && dst != src) {
-        dst->data = src->data;
-        dst->len = src->len;
-        dst->cap = src->cap;
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  if (ctx->rdi != ctx->rsi)
+    json2_string_assign(h, ctx->rdi, ctx->rsi);
+  RET(ctx->rdi);
 }
 
-// Value Constructors & Lifecycle
+// ---- Value
+
 void shim__ZN3sce4Json5ValueC1Ev(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v) {
-        memset(v, 0, sizeof(SceJsonValue));
-        v->type = SCE_JSON_TYPE_NULL;
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
-}
-
-void shim__ZN3sce4Json5ValueC1El(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v) {
-        memset(v, 0, sizeof(SceJsonValue));
-        v->type = SCE_JSON_TYPE_INT;
-        v->as.i = (int64_t)ctx->rsi;
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
-}
-
-void shim__ZN3sce4Json5ValueC1Ed(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v) {
-        memset(v, 0, sizeof(SceJsonValue));
-        v->type = SCE_JSON_TYPE_REAL;
-        v->as.r = ctx->xmm[0].f64[0];
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_value_init(h, ctx->rdi, JSON2_NULL);
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json5ValueC1Eb(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v) {
-        memset(v, 0, sizeof(SceJsonValue));
-        v->type = SCE_JSON_TYPE_BOOL;
-        v->as.b = (bool)(ctx->rsi != 0);
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_value_init_bool(h, ctx->rdi, (uint8_t)ctx->rsi);
+  RET(ctx->rdi);
+}
+
+void shim__ZN3sce4Json5ValueC1El(GuestContext *ctx) {
+  HEAP;
+  json2_value_init_int(h, ctx->rdi, (int64_t)ctx->rsi);
+  RET(ctx->rdi);
+}
+
+void shim__ZN3sce4Json5ValueC1Em(GuestContext *ctx) {
+  HEAP;
+  json2_value_init_uint(h, ctx->rdi, ctx->rsi);
+  RET(ctx->rdi);
+}
+
+void shim__ZN3sce4Json5ValueC1Ed(GuestContext *ctx) {
+  HEAP;
+  json2_value_init_real(h, ctx->rdi, ctx->xmm[0].f64[0]);
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json5ValueC1EPKc(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    const char *cstr = (const char *)guest_to_host(ctx, ctx->rsi);
-    if (v) {
-        memset(v, 0, sizeof(SceJsonValue));
-        v->type = SCE_JSON_TYPE_STRING;
-        if (cstr) {
-            size_t len = 0;
-            uint64_t g_str = alloc_guest_string(ctx, cstr, &len);
-            v->as.s.data = (char *)g_str;
-            v->as.s.len = len;
-            v->as.s.cap = len;
-        }
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  const char *s = host_chars(ctx, ctx->rsi);
+  json2_value_init_chars(h, ctx->rdi, s, strlen(s));
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json5ValueC1ERKNS0_6StringE(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    const SceJsonString *s = (const SceJsonString *)guest_to_host(ctx, ctx->rsi);
-    if (v) {
-        memset(v, 0, sizeof(SceJsonValue));
-        v->type = SCE_JSON_TYPE_STRING;
-        if (s) {
-            v->as.s = *s;
-        }
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_value_init_string(h, ctx->rdi, ctx->rsi);
+  RET(ctx->rdi);
+}
+
+void shim__ZN3sce4Json5ValueC1ERKNS0_5ArrayE(GuestContext *ctx) {
+  HEAP;
+  json2_value_init_array(h, ctx->rdi, ctx->rsi);
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json5ValueC1ERKNS0_6ObjectE(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    const SceJsonObject *obj = (const SceJsonObject *)guest_to_host(ctx, ctx->rsi);
-    if (v) {
-        memset(v, 0, sizeof(SceJsonValue));
-        v->type = SCE_JSON_TYPE_OBJECT;
-        if (obj) {
-            v->as.obj = *obj;
-        }
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_value_init_object(h, ctx->rdi, ctx->rsi);
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json5ValueD1Ev(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    free_json_value(ctx, v);
-    ctx->rax = 0;
-    SHIM_RETURN();
+  HEAP;
+  json2_value_destroy(h, ctx->rdi);
+  RET(0);
 }
 
 void shim__ZN3sce4Json5ValueaSERKS1_(GuestContext *ctx) {
-    SceJsonValue *dst = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    const SceJsonValue *src = (const SceJsonValue *)guest_to_host(ctx, ctx->rsi);
-    if (dst && src && dst != src) {
-        deep_copy_value(ctx, dst, src);
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_value_assign(h, ctx->rdi, ctx->rsi);
+  RET(ctx->rdi);
 }
 
-// Value Getters & Setters
-void shim__ZNK3sce4Json5Value7getTypeEv(GuestContext *ctx) {
-    const SceJsonValue *v = (const SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    ctx->rax = v ? (uint64_t)v->type : 0;
-    SHIM_RETURN();
+void shim__ZN3sce4Json5Value3setERKS1_(GuestContext *ctx) {
+  HEAP;
+  json2_value_assign(h, ctx->rdi, ctx->rsi);
+  RET(0);
 }
 
 void shim__ZN3sce4Json5Value3setENS0_9ValueTypeE(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v) {
-        free_json_value(ctx, v);
-        v->type = (SceJsonType)ctx->rsi;
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  uint32_t type = (uint32_t)ctx->rsi;
+  if (type > JSON2_OBJECT)
+    json_fatal("Value::set with an unknown ValueType");
+  json2_value_destroy(h, ctx->rdi);
+  json2_value_init(h, ctx->rdi, type);
+  RET(0);
+}
+
+void shim__ZN3sce4Json5Value5clearEv(GuestContext *ctx) {
+  HEAP;
+  json2_value_destroy(h, ctx->rdi); // a cleared value is null
+  RET(0);
+}
+
+void shim__ZNK3sce4Json5Value7getTypeEv(GuestContext *ctx) {
+  HEAP;
+  RET(json2_type(h, ctx->rdi));
 }
 
 void shim__ZNK3sce4Json5Value10getIntegerEv(GuestContext *ctx) {
-    const SceJsonValue *v = (const SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v && v->type == SCE_JSON_TYPE_INT) {
-        ctx->rax = (uint64_t)v->as.i;
-    } else {
-        ctx->rax = 0;
-    }
-    SHIM_RETURN();
+  HEAP;
+  RET(json2_value_int(h, ctx->rdi));
 }
 
 void shim__ZNK3sce4Json5Value7getRealEv(GuestContext *ctx) {
-    const SceJsonValue *v = (const SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v && v->type == SCE_JSON_TYPE_REAL) {
-        ctx->xmm[0].f64[0] = v->as.r;
-    } else if (v && v->type == SCE_JSON_TYPE_INT) {
-        ctx->xmm[0].f64[0] = (double)v->as.i;
-    } else {
-        ctx->xmm[0].f64[0] = 0.0;
-    }
-    SHIM_RETURN();
+  HEAP;
+  ctx->xmm[0].f64[0] = json2_value_real(h, ctx->rdi);
+  SHIM_RETURN();
 }
 
 void shim__ZNK3sce4Json5Value10getBooleanEv(GuestContext *ctx) {
-    const SceJsonValue *v = (const SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    ctx->rax = (v && v->type == SCE_JSON_TYPE_BOOL) ? (uint64_t)v->as.b : 0;
-    SHIM_RETURN();
+  HEAP;
+  uint64_t v = ctx->rdi;
+  RET(json2_type(h, v) == JSON2_BOOLEAN ? json2_u64(h, v + JSON2_PAYLOAD) : 0);
+}
+
+// Getters of a string, array or object: the value's own slot, or an empty one when the value
+// has another type.
+static uint64_t slot_of(GuestHeap *gh, uint64_t v, uint32_t type, uint64_t *empty) {
+  if (json2_type(&gh->h, v) == type)
+    return v + JSON2_PAYLOAD;
+  return static_empty(gh, empty, type);
 }
 
 void shim__ZNK3sce4Json5Value9getStringEv(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v && v->type == SCE_JSON_TYPE_STRING) {
-        ctx->rax = ctx->rdi + offsetof(SceJsonValue, as.s);
-    } else {
-        static uint64_t g_empty_str_obj = 0;
-        if (!g_empty_str_obj) {
-            g_empty_str_obj = recomp_vm_alloc(ctx, sizeof(SceJsonString));
-            SceJsonString *es = (SceJsonString *)guest_to_host(ctx, g_empty_str_obj);
-            if (es) {
-                es->data = (char *)alloc_guest_string(ctx, "", NULL);
-                es->len = 0;
-                es->cap = 0;
-            }
-        }
-        ctx->rax = g_empty_str_obj;
-    }
-    SHIM_RETURN();
+  GuestHeap gh = heap(ctx);
+  RET(slot_of(&gh, ctx->rdi, JSON2_STRING, &g_json.empty_string));
 }
 
 void shim__ZNK3sce4Json5Value9getObjectEv(GuestContext *ctx) {
-    ctx->rax = ctx->rdi + offsetof(SceJsonValue, as.obj);
-    SHIM_RETURN();
-}
-
-void shim__ZN3sce4Json5Value11referObjectEv(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v && v->type != SCE_JSON_TYPE_OBJECT) {
-        free_json_value(ctx, v);
-        memset(&v->as.obj, 0, sizeof(SceJsonObject));
-        v->type = SCE_JSON_TYPE_OBJECT;
-    }
-    ctx->rax = ctx->rdi + offsetof(SceJsonValue, as.obj);
-    SHIM_RETURN();
+  GuestHeap gh = heap(ctx);
+  RET(slot_of(&gh, ctx->rdi, JSON2_OBJECT, &g_json.empty_object));
 }
 
 void shim__ZNK3sce4Json5Value8getArrayEv(GuestContext *ctx) {
-    ctx->rax = ctx->rdi + offsetof(SceJsonValue, as.arr);
-    SHIM_RETURN();
+  GuestHeap gh = heap(ctx);
+  RET(slot_of(&gh, ctx->rdi, JSON2_ARRAY, &g_json.empty_array));
+}
+
+// refer*: the value becomes an empty object/array unless it is one, and its slot is returned.
+static uint64_t refer(Json2Heap *h, uint64_t v, uint32_t type) {
+  if (json2_type(h, v) != type) {
+    json2_value_destroy(h, v);
+    json2_value_init(h, v, type);
+  }
+  return v + JSON2_PAYLOAD;
+}
+
+void shim__ZN3sce4Json5Value11referObjectEv(GuestContext *ctx) {
+  HEAP;
+  RET(refer(h, ctx->rdi, JSON2_OBJECT));
 }
 
 void shim__ZN3sce4Json5Value10referArrayEv(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    if (v && v->type != SCE_JSON_TYPE_ARRAY) {
-        free_json_value(ctx, v);
-        memset(&v->as.arr, 0, sizeof(SceJsonArray));
-        v->type = SCE_JSON_TYPE_ARRAY;
-    }
-    ctx->rax = ctx->rdi + offsetof(SceJsonValue, as.arr);
-    SHIM_RETURN();
+  HEAP;
+  RET(refer(h, ctx->rdi, JSON2_ARRAY));
 }
 
 void shim__ZNK3sce4Json5ValueixEPKc(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    const char *key = (const char *)guest_to_host(ctx, ctx->rsi);
-    if (v && v->type == SCE_JSON_TYPE_OBJECT && key) {
-        SceJsonObjectEntry *cur = v->as.obj.head;
-        while (cur) {
-            if (cur->key && strcmp(cur->key, key) == 0) {
-                ctx->rax = (uint64_t)cur->val;
-                SHIM_RETURN();
-            }
-            cur = cur->next;
-        }
-    }
-    ctx->rax = (uint64_t)&g_json_null_value;
-    SHIM_RETURN();
+  GuestHeap gh = heap(ctx);
+  uint64_t v = ctx->rdi, m = 0;
+  if (json2_type(&gh.h, v) == JSON2_OBJECT) {
+    const char *key = host_chars(ctx, ctx->rsi);
+    m = json2_object_find(&gh.h, v + JSON2_PAYLOAD, key, strlen(key));
+  }
+  RET(m ? m : static_null(&gh));
 }
 
 void shim__ZNK3sce4Json5ValueixEm(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    size_t idx = (size_t)ctx->rsi;
-    if (v && v->type == SCE_JSON_TYPE_ARRAY && idx < v->as.arr.count) {
-        ctx->rax = (uint64_t)v->as.arr.items[idx];
-    } else {
-        ctx->rax = (uint64_t)&g_json_null_value;
-    }
-    SHIM_RETURN();
+  GuestHeap gh = heap(ctx);
+  uint64_t v = ctx->rdi, e = 0;
+  if (json2_type(&gh.h, v) == JSON2_ARRAY)
+    e = json2_array_at(&gh.h, v + JSON2_PAYLOAD, ctx->rsi);
+  RET(e ? e : static_null(&gh));
 }
 
 void shim__ZN3sce4Json5Value9serializeERNS0_6StringE(GuestContext *ctx) {
-    const SceJsonValue *v = (const SceJsonValue *)guest_to_host(ctx, ctx->rdi);
-    SceJsonString *out = (SceJsonString *)guest_to_host(ctx, ctx->rsi);
-    if (out) {
-        DynamicBuffer db = {0};
-        serialize_json_rec(ctx, v, &db);
-        if (db.buf) {
-            size_t len = db.len;
-            uint64_t g_str = alloc_guest_string(ctx, db.buf, &len);
-            free(db.buf);
-            out->data = (char *)g_str;
-            out->len = len;
-            out->cap = len;
-        } else {
-            out->data = NULL;
-            out->len = 0;
-            out->cap = 0;
-        }
-    }
-    ctx->rax = 0;
-    SHIM_RETURN();
+  HEAP;
+  json2_serialize(h, ctx->rdi, ctx->rsi);
+  RET(0);
 }
 
-// Array methods
+// ---- Array
+
+void shim__ZN3sce4Json5ArrayC1Ev(GuestContext *ctx) {
+  HEAP;
+  json2_array_init(h, ctx->rdi);
+  RET(ctx->rdi);
+}
+
+void shim__ZN3sce4Json5ArrayD1Ev(GuestContext *ctx) {
+  HEAP;
+  json2_array_destroy(h, ctx->rdi);
+  RET(0);
+}
+
 void shim__ZNK3sce4Json5Array4sizeEv(GuestContext *ctx) {
-    const SceJsonArray *arr = (const SceJsonArray *)guest_to_host(ctx, ctx->rdi);
-    ctx->rax = arr ? (uint64_t)arr->count : 0;
-    SHIM_RETURN();
+  HEAP;
+  RET(json2_array_size(h, ctx->rdi));
 }
 
 void shim__ZNK3sce4Json5Array4backEv(GuestContext *ctx) {
-    const SceJsonArray *arr = (const SceJsonArray *)guest_to_host(ctx, ctx->rdi);
-    if (arr && arr->count > 0 && arr->items) {
-        ctx->rax = (uint64_t)arr->items[arr->count - 1];
-    } else {
-        ctx->rax = (uint64_t)&g_json_null_value;
-    }
-    SHIM_RETURN();
+  GuestHeap gh = heap(ctx);
+  uint64_t n = json2_array_size(&gh.h, ctx->rdi);
+  RET(n ? json2_array_at(&gh.h, ctx->rdi, n - 1) : static_null(&gh));
 }
 
 void shim__ZN3sce4Json5Array9push_backERKNS0_5ValueE(GuestContext *ctx) {
-    SceJsonArray *arr = (SceJsonArray *)guest_to_host(ctx, ctx->rdi);
-    const SceJsonValue *val = (const SceJsonValue *)guest_to_host(ctx, ctx->rsi);
-    if (arr && val) {
-        if (arr->count + 1 > arr->cap) {
-            size_t new_cap = arr->cap ? arr->cap * 2 : 8;
-            SceJsonValue **new_items = (SceJsonValue **)realloc(arr->items, new_cap * sizeof(SceJsonValue *));
-            if (new_items) {
-                arr->items = new_items;
-                arr->cap = new_cap;
-            }
-        }
-        if (arr->count < arr->cap) {
-            SceJsonValue *nv = (SceJsonValue *)calloc(1, sizeof(SceJsonValue));
-            deep_copy_value(ctx, nv, val);
-            arr->items[arr->count++] = nv;
-        }
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_array_push_back(h, ctx->rdi, ctx->rsi);
+  RET(0);
 }
 
-// Object methods
+// ---- Object
+
 void shim__ZN3sce4Json6ObjectC1Ev(GuestContext *ctx) {
-    SceJsonObject *obj = (SceJsonObject *)guest_to_host(ctx, ctx->rdi);
-    if (obj) {
-        memset(obj, 0, sizeof(SceJsonObject));
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_object_init(h, ctx->rdi);
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json6ObjectC1ERKS1_(GuestContext *ctx) {
-    SceJsonObject *dst = (SceJsonObject *)guest_to_host(ctx, ctx->rdi);
-    const SceJsonObject *src = (const SceJsonObject *)guest_to_host(ctx, ctx->rsi);
-    if (dst) {
-        memset(dst, 0, sizeof(SceJsonObject));
-        if (src) {
-            SceJsonObjectEntry *cur = src->head;
-            while (cur) {
-                SceJsonObjectEntry *e = (SceJsonObjectEntry *)malloc(sizeof(SceJsonObjectEntry));
-                e->key = cur->key ? strdup(cur->key) : NULL;
-                e->val = (SceJsonValue *)calloc(1, sizeof(SceJsonValue));
-                if (cur->val) {
-                    deep_copy_value(ctx, e->val, cur->val);
-                }
-                e->next = dst->head;
-                dst->head = e;
-                dst->count++;
-                cur = cur->next;
-            }
-        }
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_object_init_copy(h, ctx->rdi, ctx->rsi);
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json6ObjectD1Ev(GuestContext *ctx) {
-    SceJsonObject *obj = (SceJsonObject *)guest_to_host(ctx, ctx->rdi);
-    if (obj) {
-        SceJsonObjectEntry *cur = obj->head;
-        while (cur) {
-            SceJsonObjectEntry *next = cur->next;
-            if (cur->key) free(cur->key);
-            if (cur->val) {
-                free_json_value(ctx, cur->val);
-                free(cur->val);
-            }
-            free(cur);
-            cur = next;
-        }
-        obj->head = NULL;
-        obj->count = 0;
-    }
-    ctx->rax = 0;
-    SHIM_RETURN();
+  HEAP;
+  json2_object_destroy(h, ctx->rdi);
+  RET(0);
 }
 
 void shim__ZN3sce4Json6Object5clearEv(GuestContext *ctx) {
-    SceJsonObject *obj = (SceJsonObject *)guest_to_host(ctx, ctx->rdi);
-    if (obj) {
-        SceJsonObjectEntry *cur = obj->head;
-        while (cur) {
-            SceJsonObjectEntry *next = cur->next;
-            if (cur->key) free(cur->key);
-            if (cur->val) {
-                free_json_value(ctx, cur->val);
-                free(cur->val);
-            }
-            free(cur);
-            cur = next;
-        }
-        obj->head = NULL;
-        obj->count = 0;
-    }
-    ctx->rax = 0;
-    SHIM_RETURN();
+  HEAP;
+  json2_object_clear(h, ctx->rdi);
+  RET(0);
 }
 
 void shim__ZN3sce4Json6ObjectaSERKS1_(GuestContext *ctx) {
-    SceJsonObject *dst = (SceJsonObject *)guest_to_host(ctx, ctx->rdi);
-    const SceJsonObject *src = (const SceJsonObject *)guest_to_host(ctx, ctx->rsi);
-    if (dst && src && dst != src) {
-        // Clear dst
-        SceJsonObjectEntry *cur = dst->head;
-        while (cur) {
-            SceJsonObjectEntry *next = cur->next;
-            if (cur->key) free(cur->key);
-            if (cur->val) {
-                free_json_value(ctx, cur->val);
-                free(cur->val);
-            }
-            free(cur);
-            cur = next;
-        }
-        dst->head = NULL;
-        dst->count = 0;
-
-        // Copy from src
-        cur = src->head;
-        while (cur) {
-            SceJsonObjectEntry *e = (SceJsonObjectEntry *)malloc(sizeof(SceJsonObjectEntry));
-            e->key = cur->key ? strdup(cur->key) : NULL;
-            e->val = (SceJsonValue *)calloc(1, sizeof(SceJsonValue));
-            if (cur->val) {
-                deep_copy_value(ctx, e->val, cur->val);
-            }
-            e->next = dst->head;
-            dst->head = e;
-            dst->count++;
-            cur = cur->next;
-        }
-    }
-    ctx->rax = ctx->rdi;
-    SHIM_RETURN();
+  HEAP;
+  json2_object_assign(h, ctx->rdi, ctx->rsi);
+  RET(ctx->rdi);
 }
 
 void shim__ZN3sce4Json6ObjectixERKNS0_6StringE(GuestContext *ctx) {
-    SceJsonObject *obj = (SceJsonObject *)guest_to_host(ctx, ctx->rdi);
-    const SceJsonString *s = (const SceJsonString *)guest_to_host(ctx, ctx->rsi);
-    const char *key = "";
-    if (s && s->data) {
-        const char *hk = (const char *)guest_to_host(ctx, (uint64_t)s->data);
-        if (hk) key = hk;
-    }
-    if (obj) {
-        SceJsonObjectEntry *cur = obj->head;
-        while (cur) {
-            if (cur->key && strcmp(cur->key, key) == 0) {
-                ctx->rax = (uint64_t)cur->val;
-                SHIM_RETURN();
-            }
-            cur = cur->next;
-        }
-        // Insert new entry
-        SceJsonObjectEntry *entry = (SceJsonObjectEntry *)malloc(sizeof(SceJsonObjectEntry));
-        entry->key = strdup(key);
-        entry->val = (SceJsonValue *)calloc(1, sizeof(SceJsonValue));
-        entry->val->type = SCE_JSON_TYPE_NULL;
-        entry->next = obj->head;
-        obj->head = entry;
-        obj->count++;
-        ctx->rax = (uint64_t)entry->val;
-        SHIM_RETURN();
-    }
-    ctx->rax = (uint64_t)&g_json_null_value;
-    SHIM_RETURN();
-}
-
-void shim__ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(GuestContext *ctx) {
-    SceJsonValue *v = (SceJsonValue *)guest_to_host(ctx, ctx->rsi);
-    if (v) {
-        free_json_value(ctx, v);
-        memset(v, 0, sizeof(SceJsonValue));
-        v->type = SCE_JSON_TYPE_OBJECT;
-    }
-    ctx->rax = 0; // SCE_OK
-    SHIM_RETURN();
+  HEAP;
+  uint64_t key = ctx->rsi;
+  RET(json2_object_member(h, ctx->rdi, host_chars(ctx, json2_string_cstr(h, key)), json2_string_length(h, key)));
 }

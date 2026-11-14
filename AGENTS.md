@@ -31,6 +31,8 @@ A step is done when:
 ## Conventions
 
 - Write comments, docs and commit messages in English.
+- Host tests of the C/C++ runtime go in `pkg/hosttest`, which `go test` runs; the programs under
+  `tests/` build only by hand.
 - Branch work as `gr/<topic>` and merge it into `gravity_rush`, the fork's default branch. `main`
   mirrors `wie-project/PS4Recomp`.
 - Using the internet is fine; ask the user before downloading anything.

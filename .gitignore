@@ -8,3 +8,4 @@ tools/
 libgcn_recompiler.a
 pkg/thirdparty/assets/*
 !pkg/thirdparty/assets/.gitkeep
+/.build/

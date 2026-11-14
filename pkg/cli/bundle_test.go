@@ -122,3 +122,64 @@ func TestBundleMetaVersionFallbackAndSanitizedID(t *testing.T) {
 		t.Errorf("meta = %+v", m)
 	}
 }
+
+// The runtime takes the bundle's SharedSupport as the app root (/app0) when it holds a game
+// marker (ps4_vfs.c is_app_root). A bundle built without --standalone must hold none, also when
+// an earlier build left game files there, so the game is read from the app dir it was built from;
+// a --standalone bundle holds the whole game except its executables.
+func TestPackageAppBundleGameFiles(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("app bundles are macOS only")
+	}
+	appDir := t.TempDir()
+	for _, f := range []string{"sce_sys/param.sfo", "arc/data.psarc", "eboot.bin", "sce_module/libc.prx"} {
+		p := filepath.Join(appDir, f)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(f), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := t.TempDir()
+	bin := filepath.Join(out, "ps4_app")
+	if err := copyFile("/usr/bin/true", bin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(out, "guest_image.bin"), []byte("guest"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(out, "eboot.app", "Contents", "SharedSupport")
+	list := func() []string {
+		var files []string
+		err := filepath.Walk(shared, func(p string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() {
+				return err
+			}
+			rel, _ := filepath.Rel(shared, p)
+			files = append(files, rel)
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return files
+	}
+	cfg := &Config{OutDir: out, AppDir: appDir, ElfPath: filepath.Join(appDir, "eboot.bin")}
+
+	cfg.CopyResources = true
+	if _, err := packageAppBundle(cfg, "eboot", bin); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(list(), " "), "arc/data.psarc guest_image.bin sce_sys/param.sfo"; got != want {
+		t.Errorf("--standalone SharedSupport = %q, want %q", got, want)
+	}
+
+	cfg.CopyResources = false
+	if _, err := packageAppBundle(cfg, "eboot", bin); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(list(), " "), "guest_image.bin"; got != want {
+		t.Errorf("SharedSupport without --standalone = %q, want %q", got, want)
+	}
+}

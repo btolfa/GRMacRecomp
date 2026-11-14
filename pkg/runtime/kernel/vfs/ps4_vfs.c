@@ -35,6 +35,19 @@ typedef struct {
 static VirtualPakFile g_vfiles[MAX_VIRTUAL_FILES];
 static pthread_mutex_t g_vfile_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+// A directory is a game's app root (/app0) when it holds one of the game's markers: sce_sys/,
+// param.sfo, eboot.bin or Media/. A macOS bundle's SharedSupport/ is one only when the build
+// copied the game into it (--standalone); otherwise it holds just guest_image.bin.
+static int is_app_root(const char *dir) {
+  static const char *const markers[] = {"sce_sys", "param.sfo", "eboot.bin", "Media"};
+  char path[1024];
+  for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); i++) {
+    snprintf(path, sizeof(path), "%s/%s", dir, markers[i]);
+    if (access(path, F_OK) == 0) return 1;
+  }
+  return 0;
+}
+
 static char *discover_app_root(const char *hint) {
   // 1. Environment variable override
   const char *env = getenv("PS4_APP_DIR");
@@ -58,19 +71,15 @@ static char *discover_app_root(const char *hint) {
       strncpy(exe_dir_buf, canonical_exec, sizeof(exe_dir_buf) - 1);
       exe_dir = dirname(exe_dir_buf);
 
-      // Check inside macOS .app bundle: <exe_dir>/../SharedSupport
+      // A game copied into the macOS .app bundle: <exe_dir>/../SharedSupport or ../Resources
       char test_path[1024];
       snprintf(test_path, sizeof(test_path), "%s/../SharedSupport", exe_dir);
       char canonical_res[1024];
-      if (realpath(test_path, canonical_res) != NULL &&
-          access(canonical_res, F_OK) == 0) {
+      if (realpath(test_path, canonical_res) != NULL && is_app_root(canonical_res)) {
         return strdup(canonical_res);
       }
-
-      // Check inside macOS .app bundle: <exe_dir>/../Resources
       snprintf(test_path, sizeof(test_path), "%s/../Resources", exe_dir);
-      if (realpath(test_path, canonical_res) != NULL &&
-          access(canonical_res, F_OK) == 0) {
+      if (realpath(test_path, canonical_res) != NULL && is_app_root(canonical_res)) {
         return strdup(canonical_res);
       }
     }
@@ -79,17 +88,7 @@ static char *discover_app_root(const char *hint) {
 
   // 3. Check compile-time hint if provided and contains valid game assets/markers
   if (hint && *hint && access(hint, F_OK) == 0) {
-    char check_path[1024];
-    snprintf(check_path, sizeof(check_path), "%s/sce_sys", hint);
-    int has_sce_sys = (access(check_path, F_OK) == 0);
-    snprintf(check_path, sizeof(check_path), "%s/param.sfo", hint);
-    int has_sfo = (access(check_path, F_OK) == 0);
-    snprintf(check_path, sizeof(check_path), "%s/eboot.bin", hint);
-    int has_eboot = (access(check_path, F_OK) == 0);
-    snprintf(check_path, sizeof(check_path), "%s/Media", hint);
-    int has_media = (access(check_path, F_OK) == 0);
-
-    if (has_sce_sys || has_sfo || has_eboot || has_media) {
+    if (is_app_root(hint)) {
       char canonical_hint[1024];
       if (realpath(hint, canonical_hint) != NULL) {
         return strdup(canonical_hint);

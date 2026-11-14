@@ -1425,6 +1425,10 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 	if err := os.MkdirAll(macosDir, 0o755); err != nil {
 		return "", err
 	}
+	// SharedSupport is rebuilt each time: what an earlier build left there must not stay the app root.
+	if err := os.RemoveAll(sharedSupportDir); err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(sharedSupportDir, 0o755); err != nil {
 		return "", err
 	}
@@ -1467,45 +1471,38 @@ func packageAppBundle(cfg *Config, appName, compiledBin string) (string, error) 
 		_ = copyFile(guestImgSrc, guestImgDst)
 	}
 
-	// 4. Copy resources into Contents/SharedSupport/ (unsealed by codesign so signing takes <0.5s)
-	if cfg.AppDir != "" {
-		if cfg.CopyResources {
-			entries, err := os.ReadDir(cfg.AppDir)
-			if err == nil {
-				absOut, _ := filepath.Abs(cfg.OutDir)
-				absElf, _ := filepath.Abs(cfg.ElfPath)
-				for _, entry := range entries {
-					name := entry.Name()
-					if strings.HasPrefix(name, ".") || strings.EqualFold(name, "prx") {
-						continue
-					}
-					srcPath := filepath.Join(cfg.AppDir, name)
-					absSrc, _ := filepath.Abs(srcPath)
-					if absSrc == absOut || absSrc == absElf {
-						continue
-					}
-					ext := strings.ToLower(filepath.Ext(name))
-					if ext == ".prx" || ext == ".elf" || strings.EqualFold(name, "eboot.bin") {
-						continue
-					}
-					dstPath := filepath.Join(sharedSupportDir, name)
-					if entry.IsDir() {
-						_ = os.RemoveAll(dstPath)
-						if err := copyDirFiltered(srcPath, dstPath); err != nil {
-							return "", fmt.Errorf("failed to copy %s into app bundle: %w", name, err)
-						}
-					} else {
-						if err := copyFile(srcPath, dstPath); err != nil {
-							return "", fmt.Errorf("failed to copy %s into app bundle: %w", name, err)
-						}
-					}
+	// 4. --standalone: copy the game into Contents/SharedSupport/ (unsealed by codesign so signing
+	// takes <0.5s), which makes it the app root. Otherwise the bundle carries no game files, and the
+	// runtime finds the game at the app dir the build was made from (ps4_vfs.c is_app_root).
+	if cfg.AppDir != "" && cfg.CopyResources {
+		entries, err := os.ReadDir(cfg.AppDir)
+		if err == nil {
+			absOut, _ := filepath.Abs(cfg.OutDir)
+			absElf, _ := filepath.Abs(cfg.ElfPath)
+			for _, entry := range entries {
+				name := entry.Name()
+				if strings.HasPrefix(name, ".") || strings.EqualFold(name, "prx") {
+					continue
 				}
-			}
-		} else {
-			// Default selective copy of assets/ and sce_sys/ if present
-			for _, name := range []string{"assets", "sce_sys"} {
-				if err := copyAppDir(cfg.Roots(), name, filepath.Join(sharedSupportDir, name)); err != nil {
-					return "", fmt.Errorf("failed to copy %s into app bundle: %w", name, err)
+				srcPath := filepath.Join(cfg.AppDir, name)
+				absSrc, _ := filepath.Abs(srcPath)
+				if absSrc == absOut || absSrc == absElf {
+					continue
+				}
+				ext := strings.ToLower(filepath.Ext(name))
+				if ext == ".prx" || ext == ".elf" || strings.EqualFold(name, "eboot.bin") {
+					continue
+				}
+				dstPath := filepath.Join(sharedSupportDir, name)
+				if entry.IsDir() {
+					_ = os.RemoveAll(dstPath)
+					if err := copyDirFiltered(srcPath, dstPath); err != nil {
+						return "", fmt.Errorf("failed to copy %s into app bundle: %w", name, err)
+					}
+				} else {
+					if err := copyFile(srcPath, dstPath); err != nil {
+						return "", fmt.Errorf("failed to copy %s into app bundle: %w", name, err)
+					}
 				}
 			}
 		}

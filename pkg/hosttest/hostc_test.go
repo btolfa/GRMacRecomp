@@ -17,6 +17,12 @@ import (
 // directory on the include path.
 func buildHostC(t *testing.T, name string, sources ...string) string {
 	t.Helper()
+	return buildHostCWithIncludes(t, name, nil, sources...)
+}
+
+// buildHostCWithIncludes is buildHostC with extra include directories (relative to this package).
+func buildHostCWithIncludes(t *testing.T, name string, includes []string, sources ...string) string {
+	t.Helper()
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found")
 	}
@@ -24,6 +30,10 @@ func buildHostC(t *testing.T, name string, sources ...string) string {
 	args := []string{"-O2", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
 		filepath.Join("testdata", name, "main.c")}
 	seen := map[string]bool{}
+	for _, d := range includes {
+		seen[d] = true
+		args = append(args, "-I"+d)
+	}
 	for _, s := range sources {
 		args = append(args, s)
 		if d := filepath.Dir(s); !seen[d] {

@@ -374,6 +374,12 @@ func TestVideoOutAndEqueueShims(t *testing.T) {
 		{"sceKernelTriggerUserEvent", "F6e0kwo4cnk", "shim_sceKernelTriggerUserEvent"},
 		{"sceKernelGetEventUserData", "vz+pg2zdopI", "shim_sceKernelGetEventUserData"},
 		{"sceKernelGetEventData", "kwGyyjohI50", "shim_sceKernelGetEventData"},
+		{"sceKernelAddTimerEvent", "57ZK+ODEXWY", "shim_sceKernelAddTimerEvent"},
+		{"sceKernelDeleteTimerEvent", "YWQFUyXIVdU", "shim_sceKernelDeleteTimerEvent"},
+		{"sceKernelAddReadEvent", "VHCS3rCd0PM", "shim_sceKernelAddReadEvent"},
+		{"sceKernelDeleteReadEvent", "JxJ4tfgKlXA", "shim_sceKernelDeleteReadEvent"},
+		{"sceKernelAddWriteEvent", "R-tyYMpYaxY", "shim_sceKernelAddWriteEvent"},
+		{"sceKernelDeleteWriteEvent", "cBGTk8S92XM", "shim_sceKernelDeleteWriteEvent"},
 	}
 
 	for _, tc := range cases {

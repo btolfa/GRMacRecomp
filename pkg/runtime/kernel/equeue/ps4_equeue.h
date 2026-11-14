@@ -19,6 +19,8 @@ extern "C" {
 #define ORBIS_KERNEL_ERROR_EBADF      0x80020009
 #define ORBIS_KERNEL_ERROR_EINVAL     0x80020016
 #define ORBIS_KERNEL_ERROR_ETIMEDOUT   0x8002003c
+#define ORBIS_KERNEL_ERROR_ENOENT     0x80020002
+#define ORBIS_KERNEL_ERROR_ENOMEM     0x8002000c
 #define ORBIS_KERNEL_ERROR_EFAULT     0x8002000e
 
 typedef struct OrbisKernelEvent {
@@ -49,6 +51,12 @@ int ps4_equeue_exists(OrbisKernelEqueue eq);
 int ps4_equeue_trigger_event(OrbisKernelEqueue eq, uint64_t ident, int16_t filter, int64_t data, void *udata);
 // Drop all pending (not yet consumed) events matching (ident, filter).
 int ps4_equeue_remove_events(OrbisKernelEqueue eq, uint64_t ident, int16_t filter);
+int sceKernelAddTimerEvent(OrbisKernelEqueue eq, int id, uint32_t usec, void *udata);
+int sceKernelDeleteTimerEvent(OrbisKernelEqueue eq, int id);
+int sceKernelAddReadEvent(OrbisKernelEqueue eq, int fd, size_t size, void *udata);
+int sceKernelDeleteReadEvent(OrbisKernelEqueue eq, int fd);
+int sceKernelAddWriteEvent(OrbisKernelEqueue eq, int fd, size_t size, void *udata);
+int sceKernelDeleteWriteEvent(OrbisKernelEqueue eq, int fd);
 int sceKernelAddUserEvent(OrbisKernelEqueue eq, int id);
 int sceKernelAddUserEventEdge(OrbisKernelEqueue eq, int id);
 int sceKernelTriggerUserEvent(OrbisKernelEqueue eq, int id, void *udata);
@@ -61,6 +69,12 @@ int64_t sceKernelGetEventData(const OrbisKernelEvent *ev);
 void shim_sceKernelCreateEqueue(GuestContext *ctx);
 void shim_sceKernelDeleteEqueue(GuestContext *ctx);
 void shim_sceKernelWaitEqueue(GuestContext *ctx);
+void shim_sceKernelAddTimerEvent(GuestContext *ctx);
+void shim_sceKernelDeleteTimerEvent(GuestContext *ctx);
+void shim_sceKernelAddReadEvent(GuestContext *ctx);
+void shim_sceKernelDeleteReadEvent(GuestContext *ctx);
+void shim_sceKernelAddWriteEvent(GuestContext *ctx);
+void shim_sceKernelDeleteWriteEvent(GuestContext *ctx);
 void shim_sceKernelAddUserEvent(GuestContext *ctx);
 void shim_sceKernelAddUserEventEdge(GuestContext *ctx);
 void shim_sceKernelTriggerUserEvent(GuestContext *ctx);

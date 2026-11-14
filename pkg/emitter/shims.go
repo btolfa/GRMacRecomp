@@ -1898,6 +1898,12 @@ var knownDirectShims = []string{
 	"sceKernelAddUserEventEdge",
 	"sceKernelTriggerUserEvent",
 	"sceKernelDeleteUserEvent",
+	"sceKernelAddTimerEvent",
+	"sceKernelDeleteTimerEvent",
+	"sceKernelAddReadEvent",
+	"sceKernelDeleteReadEvent",
+	"sceKernelAddWriteEvent",
+	"sceKernelDeleteWriteEvent",
 	// VideoOut display
 	"sceVideoOutOpen",
 	"sceVideoOutClose",

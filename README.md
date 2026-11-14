@@ -26,6 +26,11 @@ Areas currently being worked on for Gravity Rush:
 - **[wie-project/PS4Recomp](https://github.com/wie-project/PS4Recomp)** — the upstream PS4 to macOS static recompiler this fork is based on.
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4)** — PS4 emulator; reference for HLE module behavior and the patch XML format.
 - **[ps4-pkg-tools](https://github.com/xXJSONDeruloXx/ps4-pkg-tools)** — PKG extraction on macOS.
+- Native x86-64 PC ports, used as a reference for how Orbis libraries, sysctls and CPU instructions behave for these games:
+  - **[gravityrush_pc](https://github.com/LucaPazienza/gravityrush_pc)** — Gravity Rush Remastered (`CUSA01113`); the main reference (ISA sites in the executable, page size, sysctl OIDs, PSN signed-out results, touch pad geometry, weak-symbol linking).
+  - **[GRport](https://github.com/qnfn/GRport)** — Gravity Rush Remastered and Gravity Rush 2 from one launcher; reference for NGS2 voice routing.
+  - **[gr2_pc](https://github.com/HayatoG/gr2_pc)** — Gravity Rush 2 port from the same shadPS4-based family.
+  - **[GR2port](https://github.com/junminlee2004/GR2port)** — Gravity Rush 2 port with a native Vulkan renderer.
 - **[SPIRV-Cross](https://github.com/KhronosGroup/SPIRV-Cross)**, **[ext-LibAtrac9](https://github.com/shadps4-emu/ext-LibAtrac9)**, **[minimp3](https://github.com/lieff/minimp3)** — bundled as submodules.
 
 ---
@@ -193,6 +198,7 @@ When playing without a physical controller, built-in keyboard emulation is activ
 
 - **[PS4Recomp](https://github.com/wie-project/PS4Recomp)** and its contributors — the recompiler, runtime and HLE modules this project is built on.
 - **[shadPS4](https://github.com/shadps4-emu/shadPS4)** — HLE module architecture and system behavior documentation.
+- **[gravityrush_pc](https://github.com/LucaPazienza/gravityrush_pc)**, **[GRport](https://github.com/qnfn/GRport)**, **[gr2_pc](https://github.com/HayatoG/gr2_pc)** and **[GR2port](https://github.com/junminlee2004/GR2port)** — native Gravity Rush ports whose runtimes documented much of the game's expected system behavior.
 - **[OpenOrbis](https://github.com/OpenOrbis)** — Open-source PS4 toolchain and reverse engineering.
 - **[ps4libdoc](https://github.com/idc/ps4libdoc)** — Symbol dictionaries and NID-to-name mappings.
 

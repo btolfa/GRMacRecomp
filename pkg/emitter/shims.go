@@ -2266,6 +2266,11 @@ var knownDirectShims = []string{
 	"sceVideoRecordingGetStatus",
 	"sceVideoRecordingSetInfo",
 	// libSceScreenShot
+	// libSceShareUtility
+	"sceShareUtilityInitialize",
+	"sceShareUtilityTerminate",
+	"sceShareUtilityOpenShareMenu",
+	"sceShareUtilityOpenShareMenuDefault",
 	"sceScreenShotEnable",
 	"sceScreenShotDisable",
 	"sceScreenShotSetOverlayImage",

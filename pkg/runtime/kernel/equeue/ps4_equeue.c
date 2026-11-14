@@ -2,11 +2,11 @@
 //
 // Orbis equeues are FreeBSD kqueues. Each guest equeue is backed by a host kqueue, which holds the
 // knotes whose filter the host kernel implements with the same semantics: EVFILT_TIMER (periodic,
-// EV_CLEAR, data = expirations since the last retrieval) and EVFILT_READ / EVFILT_WRITE on guest
-// fds, which are host fds (data = bytes available / space left, EV_EOF, NOTE_LOWAT). Events of
-// filters the host does not have (video out, graphics core, user events) are posted by the
-// runtime into a per-queue FIFO; a post triggers the host EVFILT_USER "wake" knote so a waiter
-// blocked in kevent64() returns and drains the FIFO.
+// EV_CLEAR, data = expirations since the last retrieval), EVFILT_READ / EVFILT_WRITE on guest fds,
+// which are host fds (data = bytes available / space left, EV_EOF, NOTE_LOWAT), and EVFILT_USER
+// (numbered -10 on the host, -11 on Orbis). Events of filters the host does not have (video out,
+// graphics core) are posted by the runtime into a per-queue FIFO; a post triggers the host
+// EVFILT_USER "wake" knote so a waiter blocked in kevent64() returns and drains the FIFO.
 #include "ps4_equeue.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -291,7 +291,7 @@ static int convert_host_events(const struct kevent64_s *in, int n, OrbisKernelEv
         }
         OrbisKernelEvent *e = &out[kept++];
         e->ident = in[i].ident;
-        e->filter = in[i].filter;
+        e->filter = in[i].filter == EVFILT_USER ? ORBIS_KERNEL_EVFILT_USER : in[i].filter;
         e->flags = in[i].flags & (uint16_t)~HOST_ACTION_FLAGS;
         e->fflags = in[i].fflags;
         e->data = in[i].data;
@@ -430,29 +430,24 @@ int sceKernelDeleteWriteEvent(OrbisKernelEqueue eq, int fd) {
     return delete_fd_event(eq, fd, EVFILT_WRITE);
 }
 
-int sceKernelAddUserEvent(OrbisKernelEqueue id, int ident) {
-    KernelEqueueInternal *eq = eq_acquire(id);
-    if (!eq) return (int)ORBIS_KERNEL_ERROR_EBADF;
-    eq_release(eq);
-    return 0;
+// EVFILT_USER. sceKernelAddUserEvent registers a level-triggered event: once triggered it is
+// returned by every wait until it is deleted. sceKernelAddUserEventEdge registers it with
+// EV_CLEAR: one trigger, one return. Triggering an id that is not registered fails with ENOENT;
+// a trigger replaces the udata the wait returns.
+int sceKernelAddUserEvent(OrbisKernelEqueue eq, int id) {
+    return eq_change(eq, (uint64_t)(int64_t)id, EVFILT_USER, EV_ADD, 0, 0, NULL);
 }
 
-int sceKernelAddUserEventEdge(OrbisKernelEqueue id, int ident) {
-    return sceKernelAddUserEvent(id, ident);
+int sceKernelAddUserEventEdge(OrbisKernelEqueue eq, int id) {
+    return eq_change(eq, (uint64_t)(int64_t)id, EVFILT_USER, EV_ADD | EV_CLEAR, 0, 0, NULL);
 }
 
-int sceKernelTriggerUserEvent(OrbisKernelEqueue id, int ident, void *udata) {
-    return ps4_equeue_post_event(id, (uint64_t)ident, ORBIS_KERNEL_EVFILT_USER, 0, udata);
+int sceKernelTriggerUserEvent(OrbisKernelEqueue eq, int id, void *udata) {
+    return eq_change(eq, (uint64_t)(int64_t)id, EVFILT_USER, 0, NOTE_TRIGGER, 0, udata);
 }
 
-int sceKernelDeleteUserEvent(OrbisKernelEqueue id, int ident) {
-    KernelEqueueInternal *eq = eq_acquire(id);
-    if (!eq) return (int)ORBIS_KERNEL_ERROR_EBADF;
-    pthread_mutex_lock(&eq->mutex);
-    remove_events_locked(eq, (uint64_t)ident, ORBIS_KERNEL_EVFILT_USER);
-    pthread_mutex_unlock(&eq->mutex);
-    eq_release(eq);
-    return 0;
+int sceKernelDeleteUserEvent(OrbisKernelEqueue eq, int id) {
+    return eq_change(eq, (uint64_t)(int64_t)id, EVFILT_USER, EV_DELETE, 0, 0, NULL);
 }
 
 uint64_t sceKernelGetEventId(const OrbisKernelEvent *ev) {

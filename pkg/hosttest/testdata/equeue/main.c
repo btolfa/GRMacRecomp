@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // Host test of the Orbis event queue (pkg/runtime/kernel/equeue/ps4_equeue.c): host-kqueue knotes
-// (EVFILT_TIMER, EVFILT_READ, EVFILT_WRITE), runtime-posted FIFO events, waking and deleting while
-// threads wait, and the guest shims. Driven by equeue_test.go: one case per run, named by argv[1];
-// prints PASS or FAIL lines, exits non-zero on failure.
+// (EVFILT_TIMER, EVFILT_READ, EVFILT_WRITE, EVFILT_USER), runtime-posted FIFO events, waking and
+// deleting while threads wait, and the guest shims. Driven by equeue_test.go: one case per run,
+// named by argv[1]; prints PASS or FAIL lines, exits non-zero on failure.
 #include "ps4_equeue.h"
 
 #include <pthread.h>
@@ -222,6 +222,57 @@ static void case_delete_wakes(void) {
     }
 }
 
+// A level user event stays returned until it is deleted; a trigger sets the udata.
+static void case_user_level(void) {
+    OrbisKernelEqueue eq = make_eq();
+    CHECK(sceKernelAddUserEvent(eq, 3) == 0, "add");
+    OrbisKernelEvent ev[2];
+    CHECK(poll_eq(eq, ev, 2) == 0, "not triggered yet");
+    CHECK(sceKernelTriggerUserEvent(eq, 3, (void *)0x41) == 0, "trigger");
+    CHECK(sceKernelTriggerUserEvent(eq, 3, (void *)0x42) == 0, "trigger again");
+    for (int i = 0; i < 2; i++) {
+        int n = poll_eq(eq, ev, 2);
+        CHECK(n == 1 && ev[0].filter == ORBIS_KERNEL_EVFILT_USER && ev[0].ident == 3, "n=%d filter=%d", n,
+              ev[0].filter);
+        CHECK(ev[0].flags == 0 && ev[0].fflags == 0 && ev[0].data == 0 && ev[0].udata == (void *)0x42,
+              "flags=%#x fflags=%#x data=%lld udata=%p", ev[0].flags, ev[0].fflags, (long long)ev[0].data,
+              ev[0].udata);
+    }
+    // Gravity Rush 2's reactor re-arms a received user event by deleting and adding it again.
+    CHECK(sceKernelDeleteUserEvent(eq, 3) == 0, "delete");
+    CHECK(sceKernelAddUserEvent(eq, 3) == 0, "re-add");
+    CHECK(poll_eq(eq, ev, 2) == 0, "re-added event is not triggered");
+    CHECK(sceKernelDeleteEqueue(eq) == 0, "delete eq");
+}
+
+// An edge user event (EV_CLEAR) is returned once per trigger and wakes a blocked waiter.
+static void case_user_edge(void) {
+    OrbisKernelEqueue eq = make_eq();
+    CHECK(sceKernelAddUserEventEdge(eq, -2) == 0, "add");
+    Waiter w = {.eq = eq, .rc = -1};
+    pthread_t th;
+    pthread_create(&th, NULL, waiter_main, &w);
+    usleep(20000);
+    CHECK(sceKernelTriggerUserEvent(eq, -2, (void *)0x77) == 0, "trigger");
+    pthread_join(th, NULL);
+    CHECK(w.rc == 0 && w.out == 1 && w.ev.filter == ORBIS_KERNEL_EVFILT_USER, "rc=%#x out=%d filter=%d", w.rc,
+          w.out, w.ev.filter);
+    CHECK(w.ev.ident == (uint64_t)(int64_t)-2 && w.ev.flags == EV_CLEAR_FLAG && w.ev.udata == (void *)0x77,
+          "ident=%#llx flags=%#x udata=%p", (unsigned long long)w.ev.ident, w.ev.flags, w.ev.udata);
+    OrbisKernelEvent ev;
+    CHECK(poll_eq(eq, &ev, 1) == 0, "cleared after one return");
+    CHECK(sceKernelDeleteEqueue(eq) == 0, "delete eq");
+}
+
+static void case_user_errors(void) {
+    OrbisKernelEqueue eq = make_eq();
+    CHECK(sceKernelTriggerUserEvent(eq, 5, NULL) == (int)ORBIS_KERNEL_ERROR_ENOENT, "trigger unregistered");
+    CHECK(sceKernelDeleteUserEvent(eq, 5) == (int)ORBIS_KERNEL_ERROR_ENOENT, "delete unregistered");
+    CHECK(sceKernelAddUserEvent(eq + 1000, 5) == (int)ORBIS_KERNEL_ERROR_EBADF, "bad eq");
+    CHECK(sceKernelTriggerUserEvent(eq + 1000, 5, NULL) == (int)ORBIS_KERNEL_ERROR_EBADF, "trigger bad eq");
+    CHECK(sceKernelDeleteEqueue(eq) == 0, "delete eq");
+}
+
 // The guest shims: arguments in SysV registers, udata a guest value, events in guest memory.
 static void case_shims(void) {
     static uint8_t mem[4096];
@@ -319,6 +370,9 @@ int main(int argc, char **argv) {
     else if (!strcmp(c, "mixed")) case_mixed();
     else if (!strcmp(c, "timeout")) case_timeout();
     else if (!strcmp(c, "delete-wakes")) case_delete_wakes();
+    else if (!strcmp(c, "user-level")) case_user_level();
+    else if (!strcmp(c, "user-edge")) case_user_edge();
+    else if (!strcmp(c, "user-errors")) case_user_errors();
     else if (!strcmp(c, "shims")) case_shims();
     else if (!strcmp(c, "bench")) case_bench();
     else {

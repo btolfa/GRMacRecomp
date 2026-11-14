@@ -250,7 +250,12 @@ private:
 struct DecodedVideoFrame {
     GuestBuffer buffer;
     AvPlayerFrameInfoEx info{};
+    uint32_t loop = 0; // how many times the source had restarted when the frame was decoded
 };
+
+// stream_index of the packet the demuxer queues for each decoder when a looping source restarts:
+// the decoder flushes its codec context there (only the decoder's thread may touch it).
+static constexpr int kLoopRestartPacket = -1;
 
 struct DecodedAudioFrame {
     GuestBuffer buffer;
@@ -612,6 +617,13 @@ public:
 
         if (!ok) return false;
 
+        // The first frame of a restarted loop restarts the video clock at its timestamp.
+        if (frame.loop != m_presented_loop) {
+            m_presented_loop = frame.loop;
+            m_start_time = std::chrono::steady_clock::now() - std::chrono::milliseconds(frame.info.timestamp);
+            m_total_pause_duration = std::chrono::steady_clock::duration(0);
+        }
+
         if (m_curr_video_buf.has_value()) {
             m_free_video_buffers.push(std::move(*m_curr_video_buf));
             m_curr_video_buf.reset();
@@ -809,10 +821,8 @@ private:
                 if (m_is_looping.load()) {
                     AVPLAYER_LOG("Demuxer EOF reached, looping back to start");
                     avformat_seek_file(m_fmt_ctx, -1, 0, 0, 0, 0);
-                    if (m_video_codec_ctx) avcodec_flush_buffers(m_video_codec_ctx);
-                    if (m_audio_codec_ctx) avcodec_flush_buffers(m_audio_codec_ctx);
-                    m_start_time = std::chrono::steady_clock::now();
-                    m_total_pause_duration = std::chrono::steady_clock::duration(0);
+                    if (m_video_codec_ctx) push_loop_restart(m_video_packets);
+                    if (m_audio_codec_ctx) push_loop_restart(m_audio_packets);
                     continue;
                 }
                 AVPLAYER_LOG("Demuxer EOF reached");
@@ -836,10 +846,17 @@ private:
         AVPLAYER_LOG("Demuxer worker ended");
     }
 
+    static void push_loop_restart(SafeQueue<AVPacket *> &packets) {
+        AVPacket *marker = av_packet_alloc();
+        marker->stream_index = kLoopRestartPacket;
+        packets.push(std::move(marker));
+    }
+
     void video_decoder_worker() {
         AVPLAYER_LOG("Video decoder worker started");
         AVFrame *raw_frame = av_frame_alloc();
         AVFrame *nv12_frame = av_frame_alloc();
+        uint32_t loop = 0;
 
         while (!m_workers_stop.load()) {
             if (m_video_packets.size() == 0 && m_is_eof.load()) {
@@ -848,6 +865,12 @@ private:
             AVPacket *pkt = nullptr;
             if (!m_video_packets.wait_pop(m_workers_stop, pkt) || !pkt) {
                 if (m_is_eof.load() && m_video_packets.size() == 0) break;
+                continue;
+            }
+            if (pkt->stream_index == kLoopRestartPacket) {
+                av_packet_free(&pkt);
+                avcodec_flush_buffers(m_video_codec_ctx);
+                loop++;
                 continue;
             }
 
@@ -889,6 +912,7 @@ private:
                 uint64_t ts = frame_timestamp_millis(raw_frame, st->time_base);
 
                 DecodedVideoFrame frame{};
+                frame.loop = loop;
                 frame.buffer = std::move(buf);
                 frame.info.p_data = frame.buffer.guest_addr;
                 frame.info.timestamp = ts;
@@ -920,6 +944,11 @@ private:
             AVPacket *pkt = nullptr;
             if (!m_audio_packets.wait_pop(m_workers_stop, pkt) || !pkt) {
                 if (m_is_eof.load() && m_audio_packets.size() == 0) break;
+                continue;
+            }
+            if (pkt->stream_index == kLoopRestartPacket) {
+                av_packet_free(&pkt);
+                avcodec_flush_buffers(m_audio_codec_ctx);
                 continue;
             }
 
@@ -1047,6 +1076,7 @@ private:
     std::chrono::steady_clock::time_point m_start_time;
     std::chrono::steady_clock::time_point m_pause_time;
     std::chrono::steady_clock::duration m_total_pause_duration{0};
+    uint32_t m_presented_loop = 0; // loop of the last frame get_video_data_ex returned
     uint64_t m_last_audio_ts = 0;
     std::chrono::steady_clock::time_point m_last_audio_time{};
 
